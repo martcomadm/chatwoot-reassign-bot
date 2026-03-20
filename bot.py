@@ -92,5 +92,5 @@ def run():
             print("ERROR:", e, flush=True)
 
         time.sleep(INTERVAL)
-if __name__ == "__main__":
+        
 run()
