@@ -21,26 +21,39 @@ AGENTS = [int(x) for x in os.getenv("AGENT_IDS").split(",")]
 
 HEADERS = {
     "api_access_token": TOKEN,
-    "Content-Type": "application/json"
+    "Accept": "application/json",
+    "Content-Type": "application/json",
 }
 
 def get_conversations():
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
-    r = requests.get(url, headers=HEADERS)
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    print("GET", url, "STATUS", r.status_code, flush=True)
+    print("RESPUESTA:", r.text[:500], flush=True)
+    r.raise_for_status()
     return r.json()["data"]["payload"]
 
 def get_labels(cid):
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{cid}/labels"
-    r = requests.get(url, headers=HEADERS)
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    print("GET", url, "STATUS", r.status_code, flush=True)
+    print("RESPUESTA:", r.text[:500], flush=True)
+    r.raise_for_status()
     return r.json()["payload"]
 
 def assign(cid, agent):
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{cid}/assignments"
-    requests.post(url, headers=HEADERS, json={"assignee_id": agent})
+    r = requests.post(url, headers=HEADERS, json={"assignee_id": agent}, timeout=30)
+    print("POST", url, "STATUS", r.status_code, flush=True)
+    print("RESPUESTA:", r.text[:500], flush=True)
+    r.raise_for_status()
 
 def update_meta(cid, data):
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{cid}/custom_attributes"
-    requests.post(url, headers=HEADERS, json={"custom_attributes": data})
+    r = requests.post(url, headers=HEADERS, json={"custom_attributes": data}, timeout=30)
+    print("POST", url, "STATUS", r.status_code, flush=True)
+    print("RESPUESTA:", r.text[:500], flush=True)
+    r.raise_for_status()
 
 def run():
     print("🔥 Bot activo", flush=True)
@@ -89,7 +102,9 @@ def run():
                 })
 
         except Exception as e:
+            import traceback
             print("ERROR:", e, flush=True)
+            traceback.print_exc()
 
         time.sleep(INTERVAL)
         
