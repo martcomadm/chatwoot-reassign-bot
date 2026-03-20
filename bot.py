@@ -43,7 +43,7 @@ def update_meta(cid, data):
     requests.post(url, headers=HEADERS, json={"custom_attributes": data})
 
 def run():
-    print("🔥 Bot activo")
+    print("🔥 Bot activo", flush=True)
 
     while True:
         try:
@@ -89,8 +89,8 @@ def run():
                 })
 
         except Exception as e:
-            print("ERROR:", e)
+            print("ERROR:", e, flush=True)
 
         time.sleep(INTERVAL)
-
+if __name__ == "__main__":
 run()
