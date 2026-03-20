@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+print("INICIANDO BOT...", flush=True)
+
 BASE_URL = os.getenv("CHATWOOT_BASE_URL")
 ACCOUNT_ID = os.getenv("CHATWOOT_ACCOUNT_ID")
 TOKEN = os.getenv("CHATWOOT_API_TOKEN")
