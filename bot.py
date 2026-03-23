@@ -59,10 +59,22 @@ def get_online_agents():
     response = requests.get(url, headers=HEADERS, timeout=30)
     response.raise_for_status()
 
-    payload = response.json().get("payload", [])
+    data = response.json()
+
+    # 🔥 soporte para ambos formatos (list o dict)
+    if isinstance(data, list):
+        agents_data = data
+    elif isinstance(data, dict):
+        agents_data = data.get("payload", [])
+    else:
+        agents_data = []
+
     online_agents = []
 
-    for agent in payload:
+    for agent in agents_data:
+        if not isinstance(agent, dict):
+            continue
+
         agent_id = agent.get("id")
         availability = str(agent.get("availability_status", "")).lower()
 
@@ -81,7 +93,6 @@ def assign_conversation(conversation_id: int, agent_id: int):
         timeout=30,
     )
     response.raise_for_status()
-    return response
 
 
 def update_custom_attributes(conversation_id: int, custom_attributes: dict):
@@ -93,7 +104,6 @@ def update_custom_attributes(conversation_id: int, custom_attributes: dict):
         timeout=30,
     )
     response.raise_for_status()
-    return response
 
 
 def get_next_agent(current_assignee):
@@ -104,40 +114,41 @@ def get_next_agent(current_assignee):
         return None
 
     if current_assignee in online_agents:
-        current_index = online_agents.index(current_assignee)
-        next_index = (current_index + 1) % len(online_agents)
-        return online_agents[next_index]
+        index = online_agents.index(current_assignee)
+        return online_agents[(index + 1) % len(online_agents)]
 
     return online_agents[0]
 
 
 def should_skip_conversation(conversation: dict, now_ts: int):
-    conversation_id = conversation.get("id")
+    cid = conversation.get("id")
     inbox_id = conversation.get("inbox_id")
     status = str(conversation.get("status", "")).lower()
     created_at = int(conversation.get("created_at", 0) or 0)
 
     if inbox_id != INBOX_ID:
-        return True, f"[CID {conversation_id}] omitida: inbox distinto"
+        return True, f"[CID {cid}] omitida: inbox distinto"
 
     if status in {"resolved", "snoozed"}:
-        return True, f"[CID {conversation_id}] omitida: status {status}"
+        return True, f"[CID {cid}] omitida: status {status}"
 
     if created_at == 0:
-        return True, f"[CID {conversation_id}] omitida: sin created_at"
+        return True, f"[CID {cid}] omitida: sin created_at"
 
     age = now_ts - created_at
     if age < WAIT_TIME:
-        return True, f"[CID {conversation_id}] omitida: aún no cumple {WAIT_TIME}s"
+        return True, f"[CID {cid}] omitida: aún no cumple {WAIT_TIME}s"
 
     return False, ""
 
 
 def process_conversation(conversation: dict):
     now_ts = int(time.time())
-    conversation_id = conversation["id"]
+    cid = conversation["id"]
+
     meta = conversation.get("meta", {}) or {}
     assignee = (meta.get("assignee") or {}).get("id")
+
     attrs = conversation.get("custom_attributes") or {}
     last_move = int(attrs.get("last_move", 0) or 0)
 
@@ -146,38 +157,31 @@ def process_conversation(conversation: dict):
         print(reason, flush=True)
         return
 
-    labels = get_labels(conversation_id)
+    labels = get_labels(cid)
     if LABEL in labels:
-        print(f"[CID {conversation_id}] omitida: ya tiene etiqueta '{LABEL}'", flush=True)
+        print(f"[CID {cid}] omitida: ya tiene '{LABEL}'", flush=True)
         return
 
     if last_move and (now_ts - last_move < WAIT_TIME):
-        print(f"[CID {conversation_id}] omitida: reasignada hace poco", flush=True)
+        print(f"[CID {cid}] omitida: movida recientemente", flush=True)
         return
 
     next_agent = get_next_agent(assignee)
+
     if not next_agent:
-        print(f"[CID {conversation_id}] omitida: sin agentes online", flush=True)
+        print(f"[CID {cid}] omitida: sin agentes online", flush=True)
         return
 
-    if assignee == next_agent:
-        print(f"[CID {conversation_id}] omitida: el siguiente agente online sigue siendo el mismo ({assignee})", flush=True)
+    if next_agent == assignee:
+        print(f"[CID {cid}] omitida: mismo agente online", flush=True)
         return
 
-    print(
-        f"[CID {conversation_id}] reasignando de agente {assignee} a agente {next_agent}",
-        flush=True
-    )
+    print(f"[CID {cid}] moviendo de {assignee} → {next_agent}", flush=True)
 
-    assign_conversation(conversation_id, next_agent)
-    update_custom_attributes(
-        conversation_id,
-        {
-            "last_move": now_ts
-        }
-    )
+    assign_conversation(cid, next_agent)
+    update_custom_attributes(cid, {"last_move": now_ts})
 
-    print(f"[CID {conversation_id}] reasignada correctamente", flush=True)
+    print(f"[CID {cid}] reasignada ✔", flush=True)
 
 
 def run():
@@ -185,21 +189,18 @@ def run():
 
     print("INICIANDO BOT...", flush=True)
     print("🔥 Bot activo", flush=True)
-    print(f"BASE_URL={BASE_URL}", flush=True)
-    print(f"ACCOUNT_ID={ACCOUNT_ID}", flush=True)
-    print(f"INBOX_ID={INBOX_ID}", flush=True)
-    print(f"LABEL={LABEL}", flush=True)
-    print(f"WAIT_TIME={WAIT_TIME}", flush=True)
-    print(f"INTERVAL={INTERVAL}", flush=True)
-    print(f"AGENTS={AGENTS}", flush=True)
+
+    print(f"INBOX={INBOX_ID} | AGENTS={AGENTS}", flush=True)
 
     while True:
         try:
             conversations = get_conversations()
-            for conversation in conversations:
-                process_conversation(conversation)
+
+            for c in conversations:
+                process_conversation(c)
+
         except Exception as e:
-            print(f"ERROR GENERAL: {e}", flush=True)
+            print("ERROR:", e, flush=True)
             traceback.print_exc()
 
         time.sleep(INTERVAL)
