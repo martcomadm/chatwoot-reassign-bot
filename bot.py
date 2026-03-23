@@ -6,11 +6,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-print("INICIANDO BOT...", flush=True)
-
-BASE_URL = os.getenv("CHATWOOT_BASE_URL")
-ACCOUNT_ID = os.getenv("CHATWOOT_ACCOUNT_ID")
-TOKEN = os.getenv("CHATWOOT_API_TOKEN")
+BASE_URL = os.getenv("CHATWOOT_BASE_URL", "").rstrip("/")
+ACCOUNT_ID = os.getenv("CHATWOOT_ACCOUNT_ID", "").strip()
+TOKEN = os.getenv("CHATWOOT_API_TOKEN", "").strip()
 
 INBOX_ID = int(os.getenv("TARGET_INBOX_ID", "0"))
 LABEL = os.getenv("ASSIGNED_LABEL", "asignado").strip().lower()
@@ -26,52 +24,134 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-if not BASE_URL:
-    raise Exception("Falta CHATWOOT_BASE_URL")
-if not ACCOUNT_ID:
-    raise Exception("Falta CHATWOOT_ACCOUNT_ID")
-if not TOKEN:
-    raise Exception("Falta CHATWOOT_API_TOKEN")
-if INBOX_ID == 0:
-    raise Exception("Falta TARGET_INBOX_ID")
-if not AGENTS:
-    raise Exception("Falta AGENT_IDS")
+
+def validate_config():
+    if not BASE_URL:
+        raise Exception("Falta CHATWOOT_BASE_URL")
+    if not ACCOUNT_ID:
+        raise Exception("Falta CHATWOOT_ACCOUNT_ID")
+    if not TOKEN:
+        raise Exception("Falta CHATWOOT_API_TOKEN")
+    if INBOX_ID <= 0:
+        raise Exception("TARGET_INBOX_ID inválido")
+    if not AGENTS:
+        raise Exception("Falta AGENT_IDS")
 
 
 def get_conversations():
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    print(f"GET {url} STATUS {r.status_code}", flush=True)
-    r.raise_for_status()
-    return r.json()["data"]["payload"]
+    response = requests.get(url, headers=HEADERS, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    return data.get("data", {}).get("payload", [])
 
 
-def get_labels(cid):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{cid}/labels"
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    print(f"GET {url} STATUS {r.status_code}", flush=True)
-    r.raise_for_status()
-    payload = r.json().get("payload", [])
+def get_labels(conversation_id: int):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/labels"
+    response = requests.get(url, headers=HEADERS, timeout=30)
+    response.raise_for_status()
+    payload = response.json().get("payload", [])
     return [str(x).strip().lower() for x in payload]
 
 
-def assign(cid, agent):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{cid}/assignments"
-    r = requests.post(url, headers=HEADERS, json={"assignee_id": agent}, timeout=30)
-    print(f"POST {url} STATUS {r.status_code} -> agente {agent}", flush=True)
-    print(f"RESPUESTA ASSIGN: {r.text[:500]}", flush=True)
-    r.raise_for_status()
+def assign_conversation(conversation_id: int, agent_id: int):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/assignments"
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json={"assignee_id": agent_id},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response
 
 
-def update_meta(cid, data):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{cid}/custom_attributes"
-    r = requests.post(url, headers=HEADERS, json={"custom_attributes": data}, timeout=30)
-    print(f"POST {url} STATUS {r.status_code}", flush=True)
-    print(f"RESPUESTA META: {r.text[:500]}", flush=True)
-    r.raise_for_status()
+def update_custom_attributes(conversation_id: int, custom_attributes: dict):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/custom_attributes"
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json={"custom_attributes": custom_attributes},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response
+
+
+def get_next_agent(current_assignee):
+    if current_assignee in AGENTS:
+        current_index = AGENTS.index(current_assignee)
+        next_index = (current_index + 1) % len(AGENTS)
+        return AGENTS[next_index]
+    return AGENTS[0]
+
+
+def should_skip_conversation(conversation: dict, now_ts: int):
+    conversation_id = conversation.get("id")
+    inbox_id = conversation.get("inbox_id")
+    status = str(conversation.get("status", "")).lower()
+    created_at = int(conversation.get("created_at", 0) or 0)
+
+    if inbox_id != INBOX_ID:
+        return True, f"[CID {conversation_id}] omitida: inbox distinto"
+
+    if status in {"resolved", "snoozed"}:
+        return True, f"[CID {conversation_id}] omitida: status {status}"
+
+    if created_at == 0:
+        return True, f"[CID {conversation_id}] omitida: sin created_at"
+
+    age = now_ts - created_at
+    if age < WAIT_TIME:
+        return True, f"[CID {conversation_id}] omitida: aún no cumple {WAIT_TIME}s"
+
+    return False, ""
+
+
+def process_conversation(conversation: dict):
+    now_ts = int(time.time())
+    conversation_id = conversation["id"]
+    meta = conversation.get("meta", {}) or {}
+    assignee = (meta.get("assignee") or {}).get("id")
+    attrs = conversation.get("custom_attributes") or {}
+    last_move = int(attrs.get("last_move", 0) or 0)
+
+    skip, reason = should_skip_conversation(conversation, now_ts)
+    if skip:
+        print(reason, flush=True)
+        return
+
+    labels = get_labels(conversation_id)
+    if LABEL in labels:
+        print(f"[CID {conversation_id}] omitida: ya tiene etiqueta '{LABEL}'", flush=True)
+        return
+
+    if last_move and (now_ts - last_move < WAIT_TIME):
+        print(f"[CID {conversation_id}] omitida: reasignada hace poco", flush=True)
+        return
+
+    next_agent = get_next_agent(assignee)
+
+    print(
+        f"[CID {conversation_id}] reasignando de agente {assignee} a agente {next_agent}",
+        flush=True
+    )
+
+    assign_conversation(conversation_id, next_agent)
+    update_custom_attributes(
+        conversation_id,
+        {
+            "last_move": now_ts
+        }
+    )
+
+    print(f"[CID {conversation_id}] reasignada correctamente", flush=True)
 
 
 def run():
+    validate_config()
+
+    print("INICIANDO BOT...", flush=True)
     print("🔥 Bot activo", flush=True)
     print(f"BASE_URL={BASE_URL}", flush=True)
     print(f"ACCOUNT_ID={ACCOUNT_ID}", flush=True)
@@ -84,56 +164,10 @@ def run():
     while True:
         try:
             conversations = get_conversations()
-            print(f"Conversaciones recibidas: {len(conversations)}", flush=True)
-
-            for c in conversations:
-                cid = c["id"]
-                inbox_id = c.get("inbox_id")
-                created = int(c.get("created_at", 0))
-                now = int(time.time())
-                age = now - created
-
-                meta = c.get("meta", {}) or {}
-                assignee = (meta.get("assignee") or {}).get("id")
-                status = c.get("status")
-                attrs = c.get("custom_attributes") or {}
-                last_move = int(attrs.get("last_move", 0) or 0)
-
-                print(
-                    f"[CID {cid}] inbox={inbox_id} status={status} assignee={assignee} age={age}s last_move={last_move}",
-                    flush=True
-                )
-
-                if inbox_id != INBOX_ID:
-                    print(f"[CID {cid}] omitida: inbox distinto", flush=True)
-                    continue
-
-                if age < WAIT_TIME:
-                    print(f"[CID {cid}] omitida: aún no cumple {WAIT_TIME}s", flush=True)
-                    continue
-
-                labels = get_labels(cid)
-                print(f"[CID {cid}] labels={labels}", flush=True)
-
-                if LABEL in labels:
-                    print(f"[CID {cid}] omitida: ya tiene etiqueta '{LABEL}'", flush=True)
-                    continue
-
-                if last_move and (now - last_move < WAIT_TIME):
-                    print(f"[CID {cid}] omitida: reasignada hace poco", flush=True)
-                    continue
-
-                next_agent = AGENTS[0]
-                if assignee in AGENTS:
-                    i = AGENTS.index(assignee)
-                    next_agent = AGENTS[(i + 1) % len(AGENTS)]
-
-                print(f"[CID {cid}] REASIGNANDO -> agente {next_agent}", flush=True)
-                assign(cid, next_agent)
-                update_meta(cid, {"last_move": now})
-
+            for conversation in conversations:
+                process_conversation(conversation)
         except Exception as e:
-            print("ERROR:", e, flush=True)
+            print(f"ERROR GENERAL: {e}", flush=True)
             traceback.print_exc()
 
         time.sleep(INTERVAL)
