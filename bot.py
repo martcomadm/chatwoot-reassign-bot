@@ -54,6 +54,24 @@ def get_labels(conversation_id: int):
     return [str(x).strip().lower() for x in payload]
 
 
+def get_online_agents():
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/agents"
+    response = requests.get(url, headers=HEADERS, timeout=30)
+    response.raise_for_status()
+
+    payload = response.json().get("payload", [])
+    online_agents = []
+
+    for agent in payload:
+        agent_id = agent.get("id")
+        availability = str(agent.get("availability_status", "")).lower()
+
+        if agent_id in AGENTS and availability == "online":
+            online_agents.append(agent_id)
+
+    return online_agents
+
+
 def assign_conversation(conversation_id: int, agent_id: int):
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/assignments"
     response = requests.post(
@@ -79,11 +97,18 @@ def update_custom_attributes(conversation_id: int, custom_attributes: dict):
 
 
 def get_next_agent(current_assignee):
-    if current_assignee in AGENTS:
-        current_index = AGENTS.index(current_assignee)
-        next_index = (current_index + 1) % len(AGENTS)
-        return AGENTS[next_index]
-    return AGENTS[0]
+    online_agents = get_online_agents()
+
+    if not online_agents:
+        print("⚠️ No hay agentes online disponibles", flush=True)
+        return None
+
+    if current_assignee in online_agents:
+        current_index = online_agents.index(current_assignee)
+        next_index = (current_index + 1) % len(online_agents)
+        return online_agents[next_index]
+
+    return online_agents[0]
 
 
 def should_skip_conversation(conversation: dict, now_ts: int):
@@ -131,6 +156,13 @@ def process_conversation(conversation: dict):
         return
 
     next_agent = get_next_agent(assignee)
+    if not next_agent:
+        print(f"[CID {conversation_id}] omitida: sin agentes online", flush=True)
+        return
+
+    if assignee == next_agent:
+        print(f"[CID {conversation_id}] omitida: el siguiente agente online sigue siendo el mismo ({assignee})", flush=True)
+        return
 
     print(
         f"[CID {conversation_id}] reasignando de agente {assignee} a agente {next_agent}",
