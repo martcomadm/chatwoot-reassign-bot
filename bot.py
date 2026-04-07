@@ -3,11 +3,9 @@ import time
 import traceback
 import requests
 from dotenv import load_dotenv
-from openai import OpenAI
 
 load_dotenv()
 
-# ================= CONFIG =================
 BASE_URL = os.getenv("CHATWOOT_BASE_URL", "").rstrip("/")
 ACCOUNT_ID = os.getenv("CHATWOOT_ACCOUNT_ID", "").strip()
 TOKEN = os.getenv("CHATWOOT_API_TOKEN", "").strip()
@@ -20,25 +18,12 @@ INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 
 AGENTS = [int(x.strip()) for x in os.getenv("AGENT_IDS", "").split(",") if x.strip()]
 
-# 🔥 NUEVO
-PROVEEDOR_AGENT_ID = int(os.getenv("PROVEEDOR_AGENT_ID", "0"))
-PROVEEDOR_LABEL = os.getenv("PROVEEDOR_LABEL", "proveedor")
-
-PROVEEDOR_KEYWORDS = [
-    x.strip().lower()
-    for x in os.getenv("PROVEEDOR_KEYWORDS", "").split(",")
-    if x.strip()
-]
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 HEADERS = {
     "api_access_token": TOKEN,
     "Accept": "application/json",
     "Content-Type": "application/json",
 }
 
-# ================= UTILS =================
 
 def validate_config():
     if not BASE_URL:
@@ -52,182 +37,171 @@ def validate_config():
     if not AGENTS:
         raise Exception("Falta AGENT_IDS")
 
+
 def get_conversations():
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
     response = requests.get(url, headers=HEADERS, timeout=30)
     response.raise_for_status()
-    return response.json().get("data", {}).get("payload", [])
+    data = response.json()
+    return data.get("data", {}).get("payload", [])
 
-def get_labels(conversation_id):
+
+def get_labels(conversation_id: int):
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/labels"
     response = requests.get(url, headers=HEADERS, timeout=30)
     response.raise_for_status()
-    return [str(x).lower() for x in response.json().get("payload", [])]
-
-def add_label(conversation_id, label):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/labels"
-    requests.post(url, headers=HEADERS, json={"labels": [label]}, timeout=30)
-
-def get_last_message(conversation_id):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/messages"
-    response = requests.get(url, headers=HEADERS, timeout=30)
-    response.raise_for_status()
-
     payload = response.json().get("payload", [])
+    return [str(x).strip().lower() for x in payload]
 
-    for msg in reversed(payload):
-        if msg.get("message_type") == 0:
-            return msg.get("content", "")
-
-    return payload[-1].get("content", "") if payload else ""
-
-def es_proveedor_keywords(texto):
-    if not texto:
-        return False
-    texto = texto.lower()
-    return any(k in texto for k in PROVEEDOR_KEYWORDS)
-
-# ================= IA =================
-
-def clasificar_mensaje_ia(mensaje):
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{
-                "role": "user",
-                "content": f"""
-Clasifica este mensaje en:
-cliente, proveedor u otro.
-
-Responde solo una palabra.
-
-Mensaje:
-{mensaje}
-"""
-            }],
-            temperature=0
-        )
-
-        result = response.choices[0].message.content.strip().lower()
-
-        if result not in ["cliente", "proveedor", "otro"]:
-            return "otro"
-
-        return result
-
-    except Exception as e:
-        print("Error IA:", e)
-        return "otro"
-
-# ================= CHATWOOT =================
-
-def assign_conversation(conversation_id, agent_id):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/assignments"
-    requests.post(url, headers=HEADERS, json={"assignee_id": agent_id}, timeout=30)
-
-def update_custom_attributes(conversation_id, attrs):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/custom_attributes"
-    requests.post(url, headers=HEADERS, json={"custom_attributes": attrs}, timeout=30)
 
 def get_online_agents():
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/agents"
-    data = requests.get(url, headers=HEADERS, timeout=30).json()
+    response = requests.get(url, headers=HEADERS, timeout=30)
+    response.raise_for_status()
+    data = response.json()
 
-    agents_data = data if isinstance(data, list) else data.get("payload", [])
+    # 🔥 soporte para ambos formatos (list o dict)
+    if isinstance(data, list):
+        agents_data = data
+    elif isinstance(data, dict):
+        agents_data = data.get("payload", [])
+    else:
+        agents_data = []
 
-    return [
-        a["id"]
-        for a in agents_data
-        if a.get("id") in AGENTS and str(a.get("availability_status", "")).lower() == "online"
-    ]
+    online_agents = []
+    for agent in agents_data:
+        if not isinstance(agent, dict):
+            continue
 
-def get_next_agent(current):
-    online = get_online_agents()
-    if not online:
+        agent_id = agent.get("id")
+        availability = str(agent.get("availability_status", "")).lower()
+
+        if agent_id in AGENTS and availability == "online":
+            online_agents.append(agent_id)
+
+    return online_agents
+
+
+def assign_conversation(conversation_id: int, agent_id: int):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/assignments"
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json={"assignee_id": agent_id},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
+def update_custom_attributes(conversation_id: int, custom_attributes: dict):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/custom_attributes"
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json={"custom_attributes": custom_attributes},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
+def get_next_agent(current_assignee):
+    online_agents = get_online_agents()
+
+    if not online_agents:
+        print("⚠️ No hay agentes online disponibles", flush=True)
         return None
 
-    if current in online:
-        return online[(online.index(current) + 1) % len(online)]
+    if current_assignee in online_agents:
+        index = online_agents.index(current_assignee)
+        return online_agents[(index + 1) % len(online_agents)]
 
-    return online[0]
+    return online_agents[0]
 
-# ================= CORE =================
 
-def detectar_tipo(conversation, mensaje):
-    attrs = conversation.get("custom_attributes") or {}
-    tipo_guardado = attrs.get("tipo_lead")
+def should_skip_conversation(conversation: dict, now_ts: int):
+    cid = conversation.get("id")
+    inbox_id = conversation.get("inbox_id")
+    status = str(conversation.get("status", "")).lower()
+    created_at = int(conversation.get("created_at", 0) or 0)
 
-    if tipo_guardado:
-        return tipo_guardado
+    if inbox_id != INBOX_ID:
+        return True, f"[CID {cid}] omitida: inbox distinto"
 
-    # 🔥 1. keywords primero (gratis)
-    if es_proveedor_keywords(mensaje):
-        tipo = "proveedor"
-    else:
-        # 🔥 2. IA si no detecta
-        tipo = clasificar_mensaje_ia(mensaje)
+    if status in {"resolved", "snoozed"}:
+        return True, f"[CID {cid}] omitida: status {status}"
 
-    update_custom_attributes(conversation["id"], {"tipo_lead": tipo})
-    return tipo
+    if created_at == 0:
+        return True, f"[CID {cid}] omitida: sin created_at"
 
-def process_conversation(conversation):
+    age = now_ts - created_at
+    if age < WAIT_TIME:
+        return True, f"[CID {cid}] omitida: aún no cumple {WAIT_TIME}s"
+
+    return False, ""
+
+
+def process_conversation(conversation: dict):
+    now_ts = int(time.time())
     cid = conversation["id"]
-    now = int(time.time())
 
     meta = conversation.get("meta", {}) or {}
     assignee = (meta.get("assignee") or {}).get("id")
 
-    # 🔥 obtener mensaje
-    try:
-        mensaje = get_last_message(cid)
-        tipo = detectar_tipo(conversation, mensaje)
-
-        if tipo == "proveedor":
-            print(f"[CID {cid}] 🚨 PROVEEDOR detectado", flush=True)
-
-            if assignee != PROVEEDOR_AGENT_ID:
-                assign_conversation(cid, PROVEEDOR_AGENT_ID)
-                add_label(cid, PROVEEDOR_LABEL)
-                update_custom_attributes(cid, {"last_move": now})
-
-            return
-
-    except Exception as e:
-        print(f"[CID {cid}] error IA: {e}", flush=True)
-
-    # ===== TU LÓGICA ORIGINAL =====
     attrs = conversation.get("custom_attributes") or {}
     last_move = int(attrs.get("last_move", 0) or 0)
 
-    if last_move and (now - last_move < WAIT_TIME):
+    skip, reason = should_skip_conversation(conversation, now_ts)
+    if skip:
+        print(reason, flush=True)
+        return
+
+    labels = get_labels(cid)
+    if LABEL in labels:
+        print(f"[CID {cid}] omitida: ya tiene '{LABEL}'", flush=True)
+        return
+
+    if last_move and (now_ts - last_move < WAIT_TIME):
+        print(f"[CID {cid}] omitida: movida recientemente", flush=True)
         return
 
     next_agent = get_next_agent(assignee)
 
-    if not next_agent or next_agent == assignee:
+    if not next_agent:
+        print(f"[CID {cid}] omitida: sin agentes online", flush=True)
         return
 
+    if next_agent == assignee:
+        print(f"[CID {cid}] omitida: mismo agente online", flush=True)
+        return
+
+    print(f"[CID {cid}] moviendo de {assignee} → {next_agent}", flush=True)
+
     assign_conversation(cid, next_agent)
-    update_custom_attributes(cid, {"last_move": now})
+    update_custom_attributes(cid, {"last_move": now_ts})
 
-    print(f"[CID {cid}] reasignada → {next_agent}", flush=True)
+    print(f"[CID {cid}] reasignada ✔", flush=True)
 
-# ================= RUN =================
 
 def run():
     validate_config()
-    print("🔥 BOT IA ACTIVO", flush=True)
+
+    print("INICIANDO BOT...", flush=True)
+    print("🔥 Bot activo", flush=True)
+    print(f"INBOX={INBOX_ID} | AGENTS={AGENTS}", flush=True)
 
     while True:
         try:
-            for c in get_conversations():
+            conversations = get_conversations()
+
+            for c in conversations:
                 process_conversation(c)
 
         except Exception as e:
-            print("ERROR:", e)
+            print("ERROR:", e, flush=True)
             traceback.print_exc()
 
         time.sleep(INTERVAL)
+
 
 if __name__ == "__main__":
     run()
