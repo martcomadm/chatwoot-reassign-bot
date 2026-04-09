@@ -2,6 +2,8 @@ import os
 import time
 import traceback
 import requests
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,6 +25,17 @@ HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
 }
+
+
+# 🔥 VALIDACIÓN DE HORARIO CDMX
+def is_within_schedule():
+    tz = ZoneInfo("America/Mexico_City")
+    now = datetime.now(tz)
+
+    start_hour = 7   # 7:00 AM
+    end_hour = 21    # 9:00 PM
+
+    return start_hour <= now.hour < end_hour
 
 
 def validate_config():
@@ -60,7 +73,6 @@ def get_online_agents():
     response.raise_for_status()
     data = response.json()
 
-    # 🔥 soporte para ambos formatos (list o dict)
     if isinstance(data, list):
         agents_data = data
     elif isinstance(data, dict):
@@ -191,6 +203,12 @@ def run():
 
     while True:
         try:
+            # 🔥 VALIDACIÓN DE HORARIO
+            if not is_within_schedule():
+                print("⏰ Fuera de horario (7:00 - 21:00 CDMX). Bot en espera...", flush=True)
+                time.sleep(INTERVAL)
+                continue
+
             conversations = get_conversations()
 
             for c in conversations:
