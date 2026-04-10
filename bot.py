@@ -114,7 +114,7 @@ def get_next_agent(current, online_agents):
     return online_agents[0]
 
 
-# 🔥 CHAT VIEJO (PRIORIDAD ALTA)
+# 🔥 CHAT VIEJO
 def process_old_assigned_conversation(c):
     now = int(time.time())
     cid = c["id"]
@@ -124,12 +124,22 @@ def process_old_assigned_conversation(c):
         return False
 
     age = now - created_at
+
+    # DEBUG (puedes quitar luego)
+    print(f"[DEBUG {cid}] age_h={round(age/3600,1)}", flush=True)
+
     if age < OLD_CHAT_SECONDS:
         return False
 
-    labels = get_labels(cid)
+    labels = [l.lower() for l in get_labels(cid)]
 
-    if labels != [LABEL]:
+    print(f"[DEBUG {cid}] labels={labels}", flush=True)
+
+    # 🔥 validación FINAL correcta
+    if LABEL not in labels:
+        return False
+
+    if len(labels) != 1:
         return False
 
     if PREDICTIVE_LABEL in labels:
@@ -146,7 +156,7 @@ def process_old_assigned_conversation(c):
     if contact_id:
         add_contact_label(contact_id, PREDICTIVE_LABEL)
 
-    return True  # 🔥 CLAVE
+    return True
 
 
 # 🔁 FLUJO NORMAL
@@ -170,7 +180,6 @@ def process_conversation(c, online_agents):
     meta = c.get("meta", {}) or {}
     assignee = (meta.get("assignee") or {}).get("id")
 
-    # 🚫 NO tocar chats de ADMIN
     if assignee == ADMIN_AGENT_ID:
         return
 
@@ -202,7 +211,7 @@ def process_conversation(c, online_agents):
 def run():
     validate_config()
 
-    print("🔥 BOT FINAL ACTIVO", flush=True)
+    print("🔥 BOT FINAL PRO ACTIVO", flush=True)
 
     while True:
         try:
@@ -223,7 +232,7 @@ def run():
                 was_old = process_old_assigned_conversation(c)
 
                 if was_old:
-                    continue  # 🔥 evita sobreescritura
+                    continue
 
                 process_conversation(c, online_agents)
 
