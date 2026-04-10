@@ -20,6 +20,11 @@ INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 
 AGENTS = [int(x.strip()) for x in os.getenv("AGENT_IDS", "").split(",") if x.strip()]
 
+# 🔥 NUEVAS CONFIG
+ADMIN_AGENT_ID = int(os.getenv("ADMIN_AGENT_ID", "0"))
+PREDICTIVE_LABEL = os.getenv("PREDICTIVE_LABEL", "predictivo").strip().lower()
+OLD_CHAT_SECONDS = int(os.getenv("OLD_CHAT_HOURS", "48")) * 3600
+
 HEADERS = {
     "api_access_token": TOKEN,
     "Accept": "application/json",
@@ -128,6 +133,41 @@ def get_next_agent(current_assignee):
         return online_agents[(index + 1) % len(online_agents)]
 
     return online_agents[0]
+    
+# 🔥 NUEVA LÓGICA: chats viejos asignados
+def process_old_assigned_conversation(conversation: dict):
+    now_ts = int(time.time())
+    cid = conversation["id"]
+
+    created_at = int(conversation.get("created_at", 0) or 0)
+    age = now_ts - created_at
+
+    if created_at == 0 or age < OLD_CHAT_SECONDS:
+        return
+
+    labels = get_labels(cid)
+
+    # solo "asignado"
+    if labels != [LABEL]:
+        return
+
+    # evitar reprocesar
+    if PREDICTIVE_LABEL in labels:
+        return
+
+    meta = conversation.get("meta", {}) or {}
+    contact = meta.get("sender") or {}
+    contact_id = contact.get("id")
+
+    print(f"[CID {cid}] chat viejo → ADMIN", flush=True)
+
+    assign_conversation(cid, ADMIN_AGENT_ID)
+    add_label(cid, PREDICTIVE_LABEL)
+
+    if contact_id:
+        add_contact_label(contact_id, PREDICTIVE_LABEL)
+
+    print(f"[CID {cid}] enviado a ADMIN + predictivo ✔", flush=True)
 
 
 def should_skip_conversation(conversation: dict, now_ts: int):
@@ -212,6 +252,10 @@ def run():
             conversations = get_conversations()
 
             for c in conversations:
+                # 🔥 prioridad alta
+                process_old_assigned_conversation(c)
+
+                # 🔁 flujo normal
                 process_conversation(c)
 
         except Exception as e:
