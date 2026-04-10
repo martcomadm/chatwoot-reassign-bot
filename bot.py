@@ -114,10 +114,15 @@ def get_next_agent(current, online_agents):
     return online_agents[0]
 
 
-# 🔥 CHAT VIEJO
+# 🔥 CHAT VIEJO (CORREGIDO CON FILTRO INBOX)
 def process_old_assigned_conversation(c):
-    now = int(time.time())
     cid = c["id"]
+
+    # 🔴 CRÍTICO: solo inbox 6
+    if c.get("inbox_id") != INBOX_ID:
+        return False
+
+    now = int(time.time())
 
     created_at = int(c.get("created_at", 0) or 0)
     if not created_at:
@@ -125,7 +130,6 @@ def process_old_assigned_conversation(c):
 
     age = now - created_at
 
-    # DEBUG (puedes quitar luego)
     print(f"[DEBUG {cid}] age_h={round(age/3600,1)}", flush=True)
 
     if age < OLD_CHAT_SECONDS:
@@ -135,7 +139,7 @@ def process_old_assigned_conversation(c):
 
     print(f"[DEBUG {cid}] labels={labels}", flush=True)
 
-    # 🔥 validación FINAL correcta
+    # 🔥 validación FINAL
     if LABEL not in labels:
         return False
 
@@ -161,15 +165,18 @@ def process_old_assigned_conversation(c):
 
 # 🔁 FLUJO NORMAL
 def process_conversation(c, online_agents):
-    now = int(time.time())
-
     cid = c["id"]
     inbox_id = c.get("inbox_id")
+
+    # 🔴 SOLO inbox 6
+    if inbox_id != INBOX_ID:
+        return
+
+    now = int(time.time())
+
     status = str(c.get("status", "")).lower()
     created_at = int(c.get("created_at", 0) or 0)
 
-    if inbox_id != INBOX_ID:
-        return
     if status in {"resolved", "snoozed"}:
         return
     if not created_at:
@@ -180,6 +187,7 @@ def process_conversation(c, online_agents):
     meta = c.get("meta", {}) or {}
     assignee = (meta.get("assignee") or {}).get("id")
 
+    # ❌ no tocar admin
     if assignee == ADMIN_AGENT_ID:
         return
 
@@ -211,7 +219,7 @@ def process_conversation(c, online_agents):
 def run():
     validate_config()
 
-    print("🔥 BOT FINAL PRO ACTIVO", flush=True)
+    print("🔥 BOT FINAL CORREGIDO ACTIVO", flush=True)
 
     while True:
         try:
