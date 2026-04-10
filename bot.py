@@ -20,7 +20,6 @@ INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 
 AGENTS = [int(x.strip()) for x in os.getenv("AGENT_IDS", "").split(",") if x.strip()]
 
-# 🔥 NUEVAS CONFIG
 ADMIN_AGENT_ID = int(os.getenv("ADMIN_AGENT_ID", "0"))
 PREDICTIVE_LABEL = os.getenv("PREDICTIVE_LABEL", "predictivo").strip().lower()
 OLD_CHAT_SECONDS = int(os.getenv("OLD_CHAT_HOURS", "48")) * 3600
@@ -32,7 +31,7 @@ HEADERS = {
 }
 
 
-# 🔥 HORARIO CDMX
+# ⏰ HORARIO CDMX
 def is_within_schedule():
     tz = ZoneInfo("America/Mexico_City")
     now = datetime.now(tz)
@@ -40,16 +39,12 @@ def is_within_schedule():
 
 
 def validate_config():
-    if not BASE_URL:
-        raise Exception("Falta CHATWOOT_BASE_URL")
-    if not ACCOUNT_ID:
-        raise Exception("Falta CHATWOOT_ACCOUNT_ID")
-    if not TOKEN:
-        raise Exception("Falta CHATWOOT_API_TOKEN")
+    if not BASE_URL or not ACCOUNT_ID or not TOKEN:
+        raise Exception("Faltan credenciales")
     if INBOX_ID <= 0:
-        raise Exception("TARGET_INBOX_ID inválido")
+        raise Exception("INBOX inválido")
     if not AGENTS:
-        raise Exception("Falta AGENT_IDS")
+        raise Exception("Faltan agentes")
     if ADMIN_AGENT_ID <= 0:
         raise Exception("Falta ADMIN_AGENT_ID")
 
@@ -58,38 +53,7 @@ def get_conversations():
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
     response = requests.get(url, headers=HEADERS, timeout=30)
     response.raise_for_status()
-    data = response.json()
-    return data.get("data", {}).get("payload", [])
-
-
-def get_labels(conversation_id: int):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/labels"
-    response = requests.get(url, headers=HEADERS, timeout=30)
-    response.raise_for_status()
-    payload = response.json().get("payload", [])
-    return [str(x).strip().lower() for x in payload]
-
-
-def add_label(conversation_id: int, label: str):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/labels"
-    response = requests.post(
-        url,
-        headers=HEADERS,
-        json={"labels": [label]},
-        timeout=30,
-    )
-    response.raise_for_status()
-
-
-def add_contact_label(contact_id: int, label: str):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}/labels"
-    response = requests.post(
-        url,
-        headers=HEADERS,
-        json={"labels": [label]},
-        timeout=30,
-    )
-    response.raise_for_status()
+    return response.json().get("data", {}).get("payload", [])
 
 
 def get_online_agents():
@@ -98,89 +62,83 @@ def get_online_agents():
     response.raise_for_status()
     data = response.json()
 
-    if isinstance(data, list):
-        agents_data = data
-    elif isinstance(data, dict):
-        agents_data = data.get("payload", [])
-    else:
-        agents_data = []
+    agents_data = data if isinstance(data, list) else data.get("payload", [])
 
-    online_agents = []
-    for agent in agents_data:
-        if not isinstance(agent, dict):
-            continue
-
-        agent_id = agent.get("id")
-        availability = str(agent.get("availability_status", "")).lower()
-
-        if agent_id in AGENTS and availability == "online":
-            online_agents.append(agent_id)
-
-    return online_agents
+    return [
+        a["id"]
+        for a in agents_data
+        if isinstance(a, dict)
+        and a.get("id") in AGENTS
+        and str(a.get("availability_status", "")).lower() == "online"
+    ]
 
 
-def assign_conversation(conversation_id: int, agent_id: int):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/assignments"
-    response = requests.post(
+def get_labels(cid):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{cid}/labels"
+    response = requests.get(url, headers=HEADERS, timeout=30)
+    response.raise_for_status()
+    return [str(x).lower() for x in response.json().get("payload", [])]
+
+
+def assign_conversation(cid, agent_id):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{cid}/assignments"
+    requests.post(url, headers=HEADERS, json={"assignee_id": agent_id}, timeout=30).raise_for_status()
+
+
+def add_label(cid, label):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{cid}/labels"
+    requests.post(url, headers=HEADERS, json={"labels": [label]}, timeout=30).raise_for_status()
+
+
+def add_contact_label(contact_id, label):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}/labels"
+    requests.post(url, headers=HEADERS, json={"labels": [label]}, timeout=30).raise_for_status()
+
+
+def update_last_move(cid, ts):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{cid}/custom_attributes"
+    requests.post(
         url,
         headers=HEADERS,
-        json={"assignee_id": agent_id},
+        json={"custom_attributes": {"last_move": ts}},
         timeout=30,
-    )
-    response.raise_for_status()
+    ).raise_for_status()
 
 
-def update_custom_attributes(conversation_id: int, custom_attributes: dict):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/custom_attributes"
-    response = requests.post(
-        url,
-        headers=HEADERS,
-        json={"custom_attributes": custom_attributes},
-        timeout=30,
-    )
-    response.raise_for_status()
-
-
-def get_next_agent(current_assignee):
-    online_agents = get_online_agents()
-
+def get_next_agent(current, online_agents):
     if not online_agents:
-        print("⚠️ No hay agentes online disponibles", flush=True)
         return None
-
-    if current_assignee in online_agents:
-        index = online_agents.index(current_assignee)
-        return online_agents[(index + 1) % len(online_agents)]
-
+    if current in online_agents:
+        i = online_agents.index(current)
+        return online_agents[(i + 1) % len(online_agents)]
     return online_agents[0]
 
 
-# 🔥 NUEVA LÓGICA: chats viejos asignados
-def process_old_assigned_conversation(conversation: dict):
-    now_ts = int(time.time())
-    cid = conversation["id"]
+# 🔥 CHAT VIEJO (PRIORIDAD ALTA)
+def process_old_assigned_conversation(c):
+    now = int(time.time())
+    cid = c["id"]
 
-    created_at = int(conversation.get("created_at", 0) or 0)
-    age = now_ts - created_at
+    created_at = int(c.get("created_at", 0) or 0)
+    if not created_at:
+        return False
 
-    if created_at == 0 or age < OLD_CHAT_SECONDS:
-        return
+    age = now - created_at
+    if age < OLD_CHAT_SECONDS:
+        return False
 
     labels = get_labels(cid)
 
-    # solo "asignado"
     if labels != [LABEL]:
-        return
+        return False
 
-    # evitar reprocesar
     if PREDICTIVE_LABEL in labels:
-        return
+        return False
 
-    meta = conversation.get("meta", {}) or {}
-    contact = meta.get("sender") or {}
-    contact_id = contact.get("id")
+    meta = c.get("meta", {}) or {}
+    contact_id = (meta.get("sender") or {}).get("id")
 
-    print(f"[CID {cid}] chat viejo → ADMIN", flush=True)
+    print(f"[OLD {cid}] → ADMIN", flush=True)
 
     assign_conversation(cid, ADMIN_AGENT_ID)
     add_label(cid, PREDICTIVE_LABEL)
@@ -188,87 +146,86 @@ def process_old_assigned_conversation(conversation: dict):
     if contact_id:
         add_contact_label(contact_id, PREDICTIVE_LABEL)
 
-    print(f"[CID {cid}] enviado a ADMIN + predictivo ✔", flush=True)
+    return True  # 🔥 CLAVE
 
 
-def should_skip_conversation(conversation: dict, now_ts: int):
-    cid = conversation.get("id")
-    inbox_id = conversation.get("inbox_id")
-    status = str(conversation.get("status", "")).lower()
-    created_at = int(conversation.get("created_at", 0) or 0)
+# 🔁 FLUJO NORMAL
+def process_conversation(c, online_agents):
+    now = int(time.time())
+
+    cid = c["id"]
+    inbox_id = c.get("inbox_id")
+    status = str(c.get("status", "")).lower()
+    created_at = int(c.get("created_at", 0) or 0)
 
     if inbox_id != INBOX_ID:
-        return True, f"[CID {cid}] omitida: inbox distinto"
-
+        return
     if status in {"resolved", "snoozed"}:
-        return True, f"[CID {cid}] omitida: status {status}"
+        return
+    if not created_at:
+        return
 
-    if created_at == 0:
-        return True, f"[CID {cid}] omitida: sin created_at"
+    age = now - created_at
 
-    age = now_ts - created_at
-    if age < WAIT_TIME:
-        return True, f"[CID {cid}] omitida: aún no cumple {WAIT_TIME}s"
-
-    return False, ""
-
-
-def process_conversation(conversation: dict):
-    now_ts = int(time.time())
-    cid = conversation["id"]
-
-    meta = conversation.get("meta", {}) or {}
+    meta = c.get("meta", {}) or {}
     assignee = (meta.get("assignee") or {}).get("id")
 
-    attrs = conversation.get("custom_attributes") or {}
-    last_move = int(attrs.get("last_move", 0) or 0)
-
-    skip, reason = should_skip_conversation(conversation, now_ts)
-    if skip:
-        print(reason, flush=True)
+    # 🚫 NO tocar chats de ADMIN
+    if assignee == ADMIN_AGENT_ID:
         return
+
+    attrs = c.get("custom_attributes") or {}
+    last_move = int(attrs.get("last_move", 0) or 0)
 
     labels = get_labels(cid)
 
     if LABEL in labels:
         return
 
-    if last_move and (now_ts - last_move < WAIT_TIME):
+    if age < WAIT_TIME:
         return
 
-    next_agent = get_next_agent(assignee)
+    if last_move and (now - last_move < WAIT_TIME):
+        return
+
+    next_agent = get_next_agent(assignee, online_agents)
 
     if not next_agent or next_agent == assignee:
         return
 
-    print(f"[CID {cid}] moviendo {assignee} → {next_agent}", flush=True)
+    print(f"[MOVE {cid}] {assignee} → {next_agent}", flush=True)
 
     assign_conversation(cid, next_agent)
-    update_custom_attributes(cid, {"last_move": now_ts})
-
-    print(f"[CID {cid}] reasignada ✔", flush=True)
+    update_last_move(cid, now)
 
 
 def run():
     validate_config()
 
-    print("🔥 BOT INICIADO", flush=True)
+    print("🔥 BOT FINAL ACTIVO", flush=True)
 
     while True:
         try:
             if not is_within_schedule():
-                print("⏰ Fuera de horario...", flush=True)
+                print("⏰ fuera de horario", flush=True)
                 time.sleep(INTERVAL)
                 continue
 
             conversations = get_conversations()
+            online_agents = get_online_agents()
+
+            if not online_agents:
+                print("⚠️ sin agentes online", flush=True)
+                time.sleep(INTERVAL)
+                continue
 
             for c in conversations:
-                # 🔥 prioridad alta
-                process_old_assigned_conversation(c)
+                was_old = process_old_assigned_conversation(c)
 
-                # 🔁 flujo normal
-                process_conversation(c)
+                if was_old:
+                    continue  # 🔥 evita sobreescritura
+
+                process_conversation(c, online_agents)
 
         except Exception as e:
             print("ERROR:", e, flush=True)
