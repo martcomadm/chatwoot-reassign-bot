@@ -32,15 +32,11 @@ HEADERS = {
 }
 
 
-# 🔥 VALIDACIÓN DE HORARIO CDMX
+# 🔥 HORARIO CDMX
 def is_within_schedule():
     tz = ZoneInfo("America/Mexico_City")
     now = datetime.now(tz)
-
-    start_hour = 7   # 7:00 AM
-    end_hour = 21    # 9:00 PM
-
-    return start_hour <= now.hour < end_hour
+    return 7 <= now.hour < 21
 
 
 def validate_config():
@@ -54,6 +50,8 @@ def validate_config():
         raise Exception("TARGET_INBOX_ID inválido")
     if not AGENTS:
         raise Exception("Falta AGENT_IDS")
+    if ADMIN_AGENT_ID <= 0:
+        raise Exception("Falta ADMIN_AGENT_ID")
 
 
 def get_conversations():
@@ -70,6 +68,28 @@ def get_labels(conversation_id: int):
     response.raise_for_status()
     payload = response.json().get("payload", [])
     return [str(x).strip().lower() for x in payload]
+
+
+def add_label(conversation_id: int, label: str):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/labels"
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json={"labels": [label]},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
+def add_contact_label(contact_id: int, label: str):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}/labels"
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json={"labels": [label]},
+        timeout=30,
+    )
+    response.raise_for_status()
 
 
 def get_online_agents():
@@ -133,7 +153,8 @@ def get_next_agent(current_assignee):
         return online_agents[(index + 1) % len(online_agents)]
 
     return online_agents[0]
-    
+
+
 # 🔥 NUEVA LÓGICA: chats viejos asignados
 def process_old_assigned_conversation(conversation: dict):
     now_ts = int(time.time())
@@ -208,25 +229,19 @@ def process_conversation(conversation: dict):
         return
 
     labels = get_labels(cid)
+
     if LABEL in labels:
-        print(f"[CID {cid}] omitida: ya tiene '{LABEL}'", flush=True)
         return
 
     if last_move and (now_ts - last_move < WAIT_TIME):
-        print(f"[CID {cid}] omitida: movida recientemente", flush=True)
         return
 
     next_agent = get_next_agent(assignee)
 
-    if not next_agent:
-        print(f"[CID {cid}] omitida: sin agentes online", flush=True)
+    if not next_agent or next_agent == assignee:
         return
 
-    if next_agent == assignee:
-        print(f"[CID {cid}] omitida: mismo agente online", flush=True)
-        return
-
-    print(f"[CID {cid}] moviendo de {assignee} → {next_agent}", flush=True)
+    print(f"[CID {cid}] moviendo {assignee} → {next_agent}", flush=True)
 
     assign_conversation(cid, next_agent)
     update_custom_attributes(cid, {"last_move": now_ts})
@@ -237,15 +252,12 @@ def process_conversation(conversation: dict):
 def run():
     validate_config()
 
-    print("INICIANDO BOT...", flush=True)
-    print("🔥 Bot activo", flush=True)
-    print(f"INBOX={INBOX_ID} | AGENTS={AGENTS}", flush=True)
+    print("🔥 BOT INICIADO", flush=True)
 
     while True:
         try:
-            # 🔥 VALIDACIÓN DE HORARIO
             if not is_within_schedule():
-                print("⏰ Fuera de horario (7:00 - 21:00 CDMX). Bot en espera...", flush=True)
+                print("⏰ Fuera de horario...", flush=True)
                 time.sleep(INTERVAL)
                 continue
 
