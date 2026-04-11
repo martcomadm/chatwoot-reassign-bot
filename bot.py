@@ -48,7 +48,7 @@ def validate_config():
 
 
 def get_conversations():
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations?status=open"
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations?status=open&inbox_id={INBOX_ID}"
     print(f"🌐 GET {url}", flush=True)
 
     response = requests.get(url, headers=HEADERS, timeout=30)
@@ -163,7 +163,7 @@ def process_old_assigned_conversation(c):
         print(f"[OLD {cid}] ❌ no tiene 'asignado'", flush=True)
         return False
 
-    if len(labels) != 1:
+    if LABEL not in labels:
         print(f"[OLD {cid}] ❌ tiene más labels", flush=True)
         return False
 
