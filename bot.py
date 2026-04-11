@@ -196,9 +196,6 @@ def process_conversation(c, online_agents):
 
     labels = get_labels(cid)
 
-    if LABEL in labels:
-        return
-
     if age < WAIT_TIME:
         return
 
