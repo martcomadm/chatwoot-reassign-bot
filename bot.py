@@ -114,32 +114,27 @@ def get_next_agent(current, online_agents):
     return online_agents[0]
 
 
-# 🔥 CHAT VIEJO (CORREGIDO CON FILTRO INBOX)
+# 🔥 CHAT VIEJO (SOLO asignado + 48h)
 def process_old_assigned_conversation(c):
     cid = c["id"]
 
-    # 🔴 CRÍTICO: solo inbox 6
     if c.get("inbox_id") != INBOX_ID:
         return False
 
     now = int(time.time())
-
     created_at = int(c.get("created_at", 0) or 0)
+
     if not created_at:
         return False
 
     age = now - created_at
-
-    print(f"[DEBUG {cid}] age_h={round(age/3600,1)}", flush=True)
 
     if age < OLD_CHAT_SECONDS:
         return False
 
     labels = [l.lower() for l in get_labels(cid)]
 
-    print(f"[DEBUG {cid}] labels={labels}", flush=True)
-
-    # 🔥 validación FINAL
+    # 🔒 SOLO chats con únicamente "asignado"
     if LABEL not in labels:
         return False
 
@@ -168,7 +163,6 @@ def process_conversation(c, online_agents):
     cid = c["id"]
     inbox_id = c.get("inbox_id")
 
-    # 🔴 SOLO inbox 6
     if inbox_id != INBOX_ID:
         return
 
@@ -184,20 +178,23 @@ def process_conversation(c, online_agents):
 
     age = now - created_at
 
+    labels = get_labels(cid)
+
+    # 🔒 IMPORTANTE: NO tocar chats con "asignado"
+    if LABEL in labels:
+        return
+
+    if age < WAIT_TIME:
+        return
+
     meta = c.get("meta", {}) or {}
     assignee = (meta.get("assignee") or {}).get("id")
 
-    # ❌ no tocar admin
     if assignee == ADMIN_AGENT_ID:
         return
 
     attrs = c.get("custom_attributes") or {}
     last_move = int(attrs.get("last_move", 0) or 0)
-
-    labels = get_labels(cid)
-
-    if age < WAIT_TIME:
-        return
 
     if last_move and (now - last_move < WAIT_TIME):
         return
@@ -216,12 +213,11 @@ def process_conversation(c, online_agents):
 def run():
     validate_config()
 
-    print("🔥 BOT FINAL CORREGIDO ACTIVO", flush=True)
+    print("🔥 BOT FINAL ESTABLE ACTIVO", flush=True)
 
     while True:
         try:
             if not is_within_schedule():
-                print("⏰ fuera de horario", flush=True)
                 time.sleep(INTERVAL)
                 continue
 
@@ -229,7 +225,6 @@ def run():
             online_agents = get_online_agents()
 
             if not online_agents:
-                print("⚠️ sin agentes online", flush=True)
                 time.sleep(INTERVAL)
                 continue
 
