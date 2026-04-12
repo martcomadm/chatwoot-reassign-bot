@@ -36,9 +36,15 @@ agent_index = 0
 
 # ================= HELPERS =================
 
+def safe_list(data, key):
+    if isinstance(data, list):
+        return data
+    return data.get(key, [])
+
+
 def is_within_schedule():
     now = datetime.now(tz)
-    print(f"⏰ Hora actual: {now}")
+    print(f"\n⏰ Hora actual: {now}")
     return START_HOUR <= now.hour < END_HOUR
 
 
@@ -46,13 +52,19 @@ def get_conversations():
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations?status=open&inbox_id={INBOX_ID}"
     res = requests.get(url, headers=HEADERS, timeout=30)
     res.raise_for_status()
-    return res.json().get("data", {}).get("payload", [])
+
+    data = res.json()
+    payload = data.get("data", {}).get("payload", [])
+
+    print(f"📥 Conversaciones obtenidas: {len(payload)}")
+    return payload
 
 
 def get_labels(conversation_id):
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/labels"
     res = requests.get(url, headers=HEADERS, timeout=30)
     res.raise_for_status()
+
     return res.json().get("payload", [])
 
 
@@ -60,16 +72,24 @@ def get_online_agents():
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/agents"
     res = requests.get(url, headers=HEADERS, timeout=30)
     res.raise_for_status()
-    agents = res.json().get("data", [])
+
+    data = res.json()
+    agents = safe_list(data, "data")
 
     online = [
         a["id"]
         for a in agents
-        if a.get("availability_status") == "online" and a["id"] in AGENTS
+        if a.get("availability_status") == "online"
+        and a.get("id") in AGENTS
     ]
 
     print(f"👥 Agentes online: {online}")
     return online
+
+
+def assign(conversation_id, agent_id):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/assignments"
+    requests.post(url, headers=HEADERS, json={"assignee_id": agent_id}, timeout=30)
 
 
 def add_label(conversation_id, label):
@@ -80,16 +100,6 @@ def add_label(conversation_id, label):
 def add_contact_label(contact_id, label):
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}/labels"
     requests.post(url, headers=HEADERS, json={"labels": [label]}, timeout=30)
-
-
-def assign(conversation_id, agent_id):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/assignments"
-    requests.post(
-        url,
-        headers=HEADERS,
-        json={"assignee_id": agent_id},
-        timeout=30,
-    )
 
 
 def get_age_hours(conversation):
@@ -105,7 +115,8 @@ def get_age_hours(conversation):
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
     now = datetime.now(timezone.utc)
 
-    return (now - dt).total_seconds() / 3600
+    age = (now - dt).total_seconds() / 3600
+    return age
 
 
 # ================= FLOW 1 =================
@@ -124,19 +135,17 @@ def assign_new_conversations(conversations):
     for c in conversations:
         cid = c["id"]
 
+        # 🔒 SOLO inbox correcto
         if c.get("inbox_id") != INBOX_ID:
             continue
 
         labels = get_labels(cid)
-
         print(f"[ASSIGN {cid}] labels={labels}")
 
-        # 🔒 SOLO chats nuevos
-        if labels:
-            print(f"[ASSIGN {cid}] ⛔ ya tiene labels")
+        # 🔒 SOLO chats SIN labels (nuevos)
+        if len(labels) != 0:
             continue
 
-        # 🔁 round robin SOLO con agentes online
         agent_id = online_agents[agent_index % len(online_agents)]
         agent_index += 1
 
@@ -149,7 +158,7 @@ def assign_new_conversations(conversations):
 # ================= FLOW 2 =================
 
 def process_old_conversations(conversations):
-    print("\n🧠 LIMPIEZA")
+    print("\n🧠 LIMPIEZA + PREDICTIVO")
 
     for c in conversations:
         cid = c["id"]
@@ -158,14 +167,16 @@ def process_old_conversations(conversations):
             continue
 
         age_h = get_age_hours(c)
+        print(f"[CHECK {cid}] age_h={round(age_h,2)}")
 
+        # 🔒 SOLO > 48 horas
         if age_h < 48:
             continue
 
         labels = get_labels(cid)
-
         print(f"[OLD {cid}] labels={labels}")
 
+        # 🔒 SOLO si tiene EXACTAMENTE ['asignado']
         if labels != [LABEL]:
             continue
 
@@ -183,7 +194,7 @@ def process_old_conversations(conversations):
 def run():
     global last_assign_time
 
-    print("🔥 BOT FINAL NIVEL PRODUCCIÓN ACTIVO")
+    print("🔥 BOT FINAL PRODUCCIÓN ACTIVO")
 
     while True:
         try:
@@ -195,10 +206,12 @@ def run():
             conversations = get_conversations()
             now = time.time()
 
+            # 🔁 ASIGNACIÓN CONTROLADA
             if now - last_assign_time >= ASSIGN_INTERVAL:
                 assign_new_conversations(conversations)
                 last_assign_time = now
 
+            # 🧠 LIMPIEZA 48H
             process_old_conversations(conversations)
 
         except Exception as e:
