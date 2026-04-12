@@ -56,6 +56,22 @@ def get_labels(conversation_id):
     return res.json().get("payload", [])
 
 
+def get_online_agents():
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/agents"
+    res = requests.get(url, headers=HEADERS, timeout=30)
+    res.raise_for_status()
+    agents = res.json().get("data", [])
+
+    online = [
+        a["id"]
+        for a in agents
+        if a.get("availability_status") == "online" and a["id"] in AGENTS
+    ]
+
+    print(f"👥 Agentes online: {online}")
+    return online
+
+
 def add_label(conversation_id, label):
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/labels"
     requests.post(url, headers=HEADERS, json={"labels": [label]}, timeout=30)
@@ -92,12 +108,18 @@ def get_age_hours(conversation):
     return (now - dt).total_seconds() / 3600
 
 
-# ================= FLOW 1 (PROTEGIDO) =================
+# ================= FLOW 1 =================
 
 def assign_new_conversations(conversations):
     global agent_index
 
     print("\n🔁 ASIGNACIÓN CONTROLADA")
+
+    online_agents = get_online_agents()
+
+    if not online_agents:
+        print("⛔ No hay agentes online, no se asigna nada")
+        return
 
     for c in conversations:
         cid = c["id"]
@@ -109,12 +131,13 @@ def assign_new_conversations(conversations):
 
         print(f"[ASSIGN {cid}] labels={labels}")
 
-        # 🔥 SOLO chats completamente nuevos (sin etiquetas)
+        # 🔒 SOLO chats nuevos
         if labels:
-            print(f"[ASSIGN {cid}] ⛔ ya tiene labels, no tocar")
+            print(f"[ASSIGN {cid}] ⛔ ya tiene labels")
             continue
 
-        agent_id = AGENTS[agent_index % len(AGENTS)]
+        # 🔁 round robin SOLO con agentes online
+        agent_id = online_agents[agent_index % len(online_agents)]
         agent_index += 1
 
         print(f"[ASSIGN {cid}] → agente {agent_id}")
@@ -143,7 +166,6 @@ def process_old_conversations(conversations):
 
         print(f"[OLD {cid}] labels={labels}")
 
-        # 🔥 EXACTAMENTE como pediste
         if labels != [LABEL]:
             continue
 
@@ -161,7 +183,7 @@ def process_old_conversations(conversations):
 def run():
     global last_assign_time
 
-    print("🔥 BOT FINAL ANTI-CAOS ACTIVO")
+    print("🔥 BOT FINAL NIVEL PRODUCCIÓN ACTIVO")
 
     while True:
         try:
