@@ -56,7 +56,7 @@ def get_conversations():
     data = res.json()
     payload = data.get("data", {}).get("payload", [])
 
-    print(f"📥 Conversaciones obtenidas: {len(payload)}")
+    print(f"📥 Conversaciones: {len(payload)}")
     return payload
 
 
@@ -83,7 +83,7 @@ def get_online_agents():
         and a.get("id") in AGENTS
     ]
 
-    print(f"👥 Agentes online: {online}")
+    print(f"👥 Online: {online}")
     return online
 
 
@@ -115,8 +115,7 @@ def get_age_hours(conversation):
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
     now = datetime.now(timezone.utc)
 
-    age = (now - dt).total_seconds() / 3600
-    return age
+    return (now - dt).total_seconds() / 3600
 
 
 # ================= FLOW 1 =================
@@ -124,25 +123,24 @@ def get_age_hours(conversation):
 def assign_new_conversations(conversations):
     global agent_index
 
-    print("\n🔁 ASIGNACIÓN CONTROLADA")
+    print("\n🔁 ASIGNACIÓN")
 
     online_agents = get_online_agents()
 
     if not online_agents:
-        print("⛔ No hay agentes online, no se asigna nada")
+        print("⛔ Sin agentes online")
         return
 
     for c in conversations:
         cid = c["id"]
 
-        # 🔒 SOLO inbox correcto
         if c.get("inbox_id") != INBOX_ID:
             continue
 
         labels = get_labels(cid)
         print(f"[ASSIGN {cid}] labels={labels}")
 
-        # 🔒 SOLO chats SIN labels (nuevos)
+        # 🔒 SOLO chats nuevos SIN etiquetas
         if len(labels) != 0:
             continue
 
@@ -152,13 +150,14 @@ def assign_new_conversations(conversations):
         print(f"[ASSIGN {cid}] → agente {agent_id}")
 
         assign(cid, agent_id)
-        add_label(cid, LABEL)
+
+        # ❌ YA NO agregamos 'asignado'
 
 
 # ================= FLOW 2 =================
 
 def process_old_conversations(conversations):
-    print("\n🧠 LIMPIEZA + PREDICTIVO")
+    print("\n🧠 LIMPIEZA")
 
     for c in conversations:
         cid = c["id"]
@@ -169,14 +168,13 @@ def process_old_conversations(conversations):
         age_h = get_age_hours(c)
         print(f"[CHECK {cid}] age_h={round(age_h,2)}")
 
-        # 🔒 SOLO > 48 horas
         if age_h < 48:
             continue
 
         labels = get_labels(cid)
         print(f"[OLD {cid}] labels={labels}")
 
-        # 🔒 SOLO si tiene EXACTAMENTE ['asignado']
+        # 🔒 SOLO ['asignado']
         if labels != [LABEL]:
             continue
 
@@ -194,7 +192,7 @@ def process_old_conversations(conversations):
 def run():
     global last_assign_time
 
-    print("🔥 BOT FINAL PRODUCCIÓN ACTIVO")
+    print("🔥 BOT FINAL CORREGIDO ACTIVO")
 
     while True:
         try:
@@ -206,12 +204,10 @@ def run():
             conversations = get_conversations()
             now = time.time()
 
-            # 🔁 ASIGNACIÓN CONTROLADA
             if now - last_assign_time >= ASSIGN_INTERVAL:
                 assign_new_conversations(conversations)
                 last_assign_time = now
 
-            # 🧠 LIMPIEZA 48H
             process_old_conversations(conversations)
 
         except Exception as e:
