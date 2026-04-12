@@ -38,14 +38,8 @@ agent_index = 0
 
 def is_within_schedule():
     now = datetime.now(tz)
-    hour = now.hour
     print(f"⏰ Hora actual: {now}")
-
-    if START_HOUR <= hour < END_HOUR:
-        return True
-
-    print("🌙 Fuera de horario")
-    return False
+    return START_HOUR <= now.hour < END_HOUR
 
 
 def get_conversations():
@@ -98,12 +92,12 @@ def get_age_hours(conversation):
     return (now - dt).total_seconds() / 3600
 
 
-# ================= FLOW 1 =================
+# ================= FLOW 1 (PROTEGIDO) =================
 
 def assign_new_conversations(conversations):
     global agent_index
 
-    print("\n🔁 ASIGNACIÓN")
+    print("\n🔁 ASIGNACIÓN CONTROLADA")
 
     for c in conversations:
         cid = c["id"]
@@ -113,7 +107,11 @@ def assign_new_conversations(conversations):
 
         labels = get_labels(cid)
 
-        if LABEL in labels:
+        print(f"[ASSIGN {cid}] labels={labels}")
+
+        # 🔥 SOLO chats completamente nuevos (sin etiquetas)
+        if labels:
+            print(f"[ASSIGN {cid}] ⛔ ya tiene labels, no tocar")
             continue
 
         agent_id = AGENTS[agent_index % len(AGENTS)]
@@ -143,7 +141,9 @@ def process_old_conversations(conversations):
 
         labels = get_labels(cid)
 
-        # 🔥 EXACTO como pediste
+        print(f"[OLD {cid}] labels={labels}")
+
+        # 🔥 EXACTAMENTE como pediste
         if labels != [LABEL]:
             continue
 
@@ -161,11 +161,12 @@ def process_old_conversations(conversations):
 def run():
     global last_assign_time
 
-    print("🔥 BOT FINAL PRO ACTIVO (ZONEINFO)")
+    print("🔥 BOT FINAL ANTI-CAOS ACTIVO")
 
     while True:
         try:
             if not is_within_schedule():
+                print("🌙 Fuera de horario")
                 time.sleep(60)
                 continue
 
