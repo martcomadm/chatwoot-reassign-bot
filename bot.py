@@ -18,7 +18,7 @@ LABEL = os.getenv("LABEL", "asignado")
 PREDICTIVE_LABEL = os.getenv("PREDICTIVE_LABEL", "predictivo")
 
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
-ASSIGN_INTERVAL = int(os.getenv("ASSIGN_INTERVAL", 180))
+ASSIGN_INTERVAL = int(os.getenv("ASSIGN_INTERVAL", 300))
 
 START_HOUR = int(os.getenv("START_HOUR", 7))
 END_HOUR = int(os.getenv("END_HOUR", 21))
