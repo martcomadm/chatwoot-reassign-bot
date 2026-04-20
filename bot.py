@@ -12,13 +12,15 @@ ACCOUNT_ID = int(os.getenv("ACCOUNT_ID"))
 INBOX_ID = int(os.getenv("INBOX_ID"))
 
 AGENTS = list(map(int, os.getenv("AGENTS").split(",")))
+EXCLUDED_AGENTS = list(map(int, os.getenv("EXCLUDED_AGENTS", "").split(","))) if os.getenv("EXCLUDED_AGENTS") else []
+
 ADMIN_AGENT_ID = int(os.getenv("ADMIN_AGENT_ID"))
 
 LABEL = os.getenv("LABEL", "asignado")
 PREDICTIVE_LABEL = os.getenv("PREDICTIVE_LABEL", "predictivo")
 
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
-ASSIGN_INTERVAL = int(os.getenv("ASSIGN_INTERVAL", 300))
+ASSIGN_INTERVAL = int(os.getenv("ASSIGN_INTERVAL", 240))
 
 START_HOUR = int(os.getenv("START_HOUR", 7))
 END_HOUR = int(os.getenv("END_HOUR", 21))
@@ -98,9 +100,10 @@ def get_online_agents():
         for a in agents
         if a.get("availability_status") == "online"
         and a.get("id") in AGENTS
+        and a.get("id") not in EXCLUDED_AGENTS
     ]
 
-    print(f"👥 Agentes online: {online}")
+    print(f"👥 Agentes online (filtrados): {online}")
     return online
 
 
@@ -154,6 +157,12 @@ def assign_new_conversations(conversations):
         if c.get("inbox_id") != INBOX_ID:
             continue
 
+        # 🔒 NO TOCAR chats de agentes excluidos
+        current_assignee = c.get("meta", {}).get("assignee", {}).get("id")
+        if current_assignee in EXCLUDED_AGENTS:
+            print(f"[SKIP {cid}] asignado a excluido {current_assignee}")
+            continue
+
         labels = get_labels(cid)
         print(f"[ASSIGN {cid}] labels={labels}")
 
@@ -180,6 +189,12 @@ def process_old_conversations(conversations):
         cid = c["id"]
 
         if c.get("inbox_id") != INBOX_ID:
+            continue
+
+        # 🔒 NO TOCAR chats de agentes excluidos
+        current_assignee = c.get("meta", {}).get("assignee", {}).get("id")
+        if current_assignee in EXCLUDED_AGENTS:
+            print(f"[SKIP OLD {cid}] agente excluido {current_assignee}")
             continue
 
         age_h = get_age_hours(c)
