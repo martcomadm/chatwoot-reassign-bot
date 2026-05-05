@@ -22,8 +22,8 @@ PREDICTIVE_LABEL = os.getenv("PREDICTIVE_LABEL", "predictivo")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
 ASSIGN_INTERVAL = int(os.getenv("ASSIGN_INTERVAL", 300))
 
-START_HOUR = int(os.getenv("START_HOUR", 7))
-END_HOUR = int(os.getenv("END_HOUR", 21))
+START_HOUR = int(os.getenv("START_HOUR", 9))
+END_HOUR = int(os.getenv("END_HOUR", 20))
 TIMEZONE = os.getenv("TIMEZONE", "America/Mexico_City")
 
 tz = ZoneInfo(TIMEZONE)
