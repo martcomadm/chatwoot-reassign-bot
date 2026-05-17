@@ -16,7 +16,7 @@ EXCLUDED_AGENTS = list(map(int, os.getenv("EXCLUDED_AGENTS", "").split(","))) if
 
 ADMIN_AGENT_ID = int(os.getenv("ADMIN_AGENT_ID"))
 
-# Etiqueta que el AGENTE HUMANO pone manualmente para detener la reasignación
+# Etiqueta que el agente pone manualmente para detener el bot
 LABEL = os.getenv("LABEL", "asignado") 
 PREDICTIVE_LABEL = os.getenv("PREDICTIVE_LABEL", "predictivo")
 
@@ -24,7 +24,6 @@ CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
 ASSIGN_INTERVAL = int(os.getenv("ASSIGN_INTERVAL", 300))
 
 # ⏰ TIEMPO DE REASIGNACIÓN (en minutos)
-# Si el agente no pone la etiqueta "asignado" en este tiempo, se mueve al siguiente.
 REASSIGN_TIMEOUT_MINUTES = int(os.getenv("REASSIGN_TIMEOUT_MINUTES", 15))
 
 START_HOUR = int(os.getenv("START_HOUR", 9))
@@ -118,7 +117,6 @@ def assign(conversation_id, agent_id):
 
 
 def add_label(conversation_id, label):
-    # Obtenemos actuales para no borrarlas
     current_labels = get_labels(conversation_id)
     if label not in current_labels:
         current_labels.append(label)
@@ -132,7 +130,6 @@ def add_contact_label(contact_id, label):
 
 
 def get_age_minutes(conversation):
-    """Calcula minutos desde la última actividad"""
     ts = (
         conversation.get("last_activity_at")
         or conversation.get("updated_at")
@@ -157,7 +154,7 @@ def get_age_hours(conversation):
     return (now - dt).total_seconds() / 3600
 
 
-# ================= FLOW 1: NUEVOS (Solo asigna si NO tiene agente) =================
+# ================= FLOW 1: NUEVOS =================
 
 def assign_new_conversations(conversations):
     global agent_index
@@ -175,37 +172,32 @@ def assign_new_conversations(conversations):
         if c.get("inbox_id") != INBOX_ID:
             continue
 
-        # 🔒 CORRECCIÓN CRÍTICA: Solo entrar si NO tiene agente asignado.
-        # Si ya tiene agente, este chat es candidato para Flow 2 (Reasignación), no para nuevo.
+        # Solo entrar si NO tiene agente asignado
         current_assignee = c.get("meta", {}).get("assignee", {}).get("id")
         if current_assignee:
             continue
 
-        # 🔒 NO TOCAR chats de agentes excluidos
         if current_assignee in EXCLUDED_AGENTS:
             continue
 
-        # Verificamos etiquetas solo para filtrar los que ya fueron procesados manualmente
+        # Si ya tiene etiquetas, no es "nuevo" limpio, lo respetamos
         labels = get_labels(cid)
-        if LABEL in labels:
+        if len(labels) > 0:
             continue
 
-        # Asignación Round Robin
         agent_id = online_agents[agent_index % len(online_agents)]
         agent_index += 1
 
         print(f"[NEW {cid}] → Asignando a agente {agent_id}")
 
         assign(cid, agent_id)
-        
-        # ❌ IMPORTANTE: NO ponemos la etiqueta 'asignado' aquí.
-        # El agente humano debe ponerla para confirmar atención.
+        # No ponemos etiqueta. El agente debe ponerla.
 
 
-# ================= FLOW 2: REASIGNACIÓN (Si no ponen etiqueta a tiempo) =================
+# ================= FLOW 2: REASIGNACIÓN =================
 
 def reassign_unanswered_chats(conversations):
-    print(f"\n🔄 REASIGNACIÓN AUTOMÁTICA (Sin etiqueta '{LABEL}' > {REASSIGN_TIMEOUT_MINUTES} min)")
+    print(f"\n🔄 REASIGNACIÓN (Sin etiquetas y > {REASSIGN_TIMEOUT_MINUTES} min)")
 
     online_agents = get_online_agents()
     if not online_agents:
@@ -217,24 +209,26 @@ def reassign_unanswered_chats(conversations):
         # 1. Debe tener un agente asignado actualmente
         current_assignee = c.get("meta", {}).get("assignee", {}).get("id")
         if not current_assignee:
-            continue # Sin asignar, lo ignora el Flow 1
+            continue
             
         if current_assignee in EXCLUDED_AGENTS:
             continue
 
-        # 2. Verificar si tiene la etiqueta "asignado"
+        # 2. LÓGICA DE ETIQUETAS (LA REGLA NUEVA)
         labels = get_labels(cid)
         
-        # ✅ CONDICIÓN DE PARO: Si tiene la etiqueta, el agente lo atendió. No tocar.
-        if LABEL in labels:
+        # 🚫 REGLA: Si tiene CUALQUIER etiqueta (sea "asignado", "seguimiento", etc.), NO SE MUEVE.
+        # Solo movemos chats "limpios" (sin etiquetas) que parecen olvidados.
+        if len(labels) > 0:
+            # Opcional: Descomentar para ver debug
+            # print(f"[SKIP {cid}] Tiene etiquetas ({labels}), se respeta.")
             continue
             
         # 3. Verificar tiempo transcurrido
         age_min = get_age_minutes(c)
         
-        # Si ha pasado el tiempo límite
         if age_min >= REASSIGN_TIMEOUT_MINUTES:
-            print(f"[REASIGN {cid}] Inactivo {round(age_min, 1)} min sin etiqueta. Moviendo...")
+            print(f"[REASIGN {cid}] Inactivo {round(age_min, 1)} min SIN etiquetas. Moviendo...")
             
             # Buscar un agente diferente al actual
             available = [a for a in online_agents if a != current_assignee]
@@ -243,12 +237,9 @@ def reassign_unanswered_chats(conversations):
                 print(f"⛔ No hay otros agentes online para reasignar el chat {cid}")
                 continue
                 
-            # Seleccionar el siguiente agente (round robin simple)
             new_agent = available[0] 
             
             assign(cid, new_agent)
-            # Nota: Al reasignar, Chatwoot suele actualizar 'last_activity_at', 
-            # por lo que el contador de tiempo se reinicia para el nuevo agente.
             print(f"[REASIGN {cid}] → Movido de {current_assignee} a {new_agent}")
 
 
@@ -278,11 +269,9 @@ def process_old_conversations(conversations):
 
         labels = get_labels(cid)
         
-        # Si ya está en predictivo, saltamos
         if PREDICTIVE_LABEL in labels:
             continue
 
-        # Si tiene la etiqueta de asignado o está abierto hace mucho, lo mandamos a admin
         print(f"[OLD {cid}] → ADMIN (Predictivo)")
         assign(cid, ADMIN_AGENT_ID)
         add_label(cid, PREDICTIVE_LABEL)
@@ -298,7 +287,7 @@ def process_old_conversations(conversations):
 def run():
     global last_assign_time
 
-    print("🔥 BOT ACTIVO - MODO REASIGNACIÓN POR ETIQUETA MANUAL")
+    print("🔥 BOT ACTIVO - MODO REASIGNACIÓN ESTRICTA (Respeta etiquetas)")
 
     while True:
         try:
@@ -315,11 +304,10 @@ def run():
                 assign_new_conversations(conversations)
                 last_assign_time = now
 
-            # 2. REASIGNACIÓN POR FALTA DE ETIQUETA
-            # Se ejecuta siempre para vigilar los tiempos
+            # 2. REASIGNACIÓN
             reassign_unanswered_chats(conversations)
 
-            # 3. LIMPIEZA 48H
+            # 3. LIMPIEZA
             process_old_conversations(conversations)
 
         except Exception as e:
