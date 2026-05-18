@@ -25,7 +25,7 @@ ASSIGN_INTERVAL = int(os.getenv("ASSIGN_INTERVAL", 300))
 
 # ⏰ TIEMPO DE REASIGNACIÓN (en minutos)
 # Si el agente no pone ninguna etiqueta en este tiempo, el bot mueve el chat al siguiente agente.
-REASSIGN_TIMEOUT_MINUTES = int(os.getenv("REASSIGN_TIMEOUT_MINUTES", 15))
+REASSIGN_TIMEOUT_MINUTES = int(os.getenv("REASSIGN_TIMEOUT_MINUTES", 4))
 
 START_HOUR = int(os.getenv("START_HOUR", 9))
 END_HOUR = int(os.getenv("END_HOUR", 20))
