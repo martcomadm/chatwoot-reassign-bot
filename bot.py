@@ -24,7 +24,8 @@ CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
 ASSIGN_INTERVAL = int(os.getenv("ASSIGN_INTERVAL", 300))
 
 # ⏰ TIEMPO DE REASIGNACIÓN (en minutos)
-REASSIGN_TIMEOUT_MINUTES = int(os.getenv("REASSIGN_TIMEOUT_MINUTES", 4))
+# Si el agente no pone ninguna etiqueta en este tiempo, el bot mueve el chat al siguiente agente.
+REASSIGN_TIMEOUT_MINUTES = int(os.getenv("REASSIGN_TIMEOUT_MINUTES", 15))
 
 START_HOUR = int(os.getenv("START_HOUR", 9))
 END_HOUR = int(os.getenv("END_HOUR", 20))
@@ -66,8 +67,12 @@ def get_conversations():
             "page": page
         }
 
-        res = requests.get(url, headers=HEADERS, params=params, timeout=30)
-        res.raise_for_status()
+        try:
+            res = requests.get(url, headers=HEADERS, params=params, timeout=30)
+            res.raise_for_status()
+        except Exception as e:
+            print(f"❌ Error obteniendo conversaciones: {e}")
+            return []
 
         data = res.json()
         payload = data.get("data", {}).get("payload", [])
@@ -85,48 +90,65 @@ def get_conversations():
 
 
 def get_labels(conversation_id):
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/labels"
-    res = requests.get(url, headers=HEADERS, timeout=30)
-    res.raise_for_status()
-    return res.json().get("payload", [])
+    try:
+        url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/labels"
+        res = requests.get(url, headers=HEADERS, timeout=30)
+        res.raise_for_status()
+        return res.json().get("payload", [])
+    except:
+        return []
 
 
 def get_online_agents():
-    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/agents"
-    res = requests.get(url, headers=HEADERS, timeout=30)
-    res.raise_for_status()
+    try:
+        url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/agents"
+        res = requests.get(url, headers=HEADERS, timeout=30)
+        res.raise_for_status()
 
-    data = res.json()
-    agents = safe_list(data, "data")
+        data = res.json()
+        agents = safe_list(data, "data")
 
-    online = [
-        a["id"]
-        for a in agents
-        if a.get("availability_status") == "online"
-        and a.get("id") in AGENTS
-        and a.get("id") not in EXCLUDED_AGENTS
-    ]
+        online = [
+            a["id"]
+            for a in agents
+            if a.get("availability_status") == "online"
+            and a.get("id") in AGENTS
+            and a.get("id") not in EXCLUDED_AGENTS
+        ]
 
-    print(f"👥 Agentes online (filtrados): {online}")
-    return online
+        print(f"👥 Agentes online (filtrados): {online}")
+        return online
+    except Exception as e:
+        print(f"❌ Error obteniendo agentes: {e}")
+        return []
 
 
 def assign(conversation_id, agent_id):
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/assignments"
-    requests.post(url, headers=HEADERS, json={"assignee_id": agent_id}, timeout=30)
+    try:
+        requests.post(url, headers=HEADERS, json={"assignee_id": agent_id}, timeout=30)
+    except Exception as e:
+        print(f"❌ Error asignando {conversation_id}: {e}")
 
 
 def add_label(conversation_id, label):
+    # Obtenemos actuales para no borrarlas
     current_labels = get_labels(conversation_id)
     if label not in current_labels:
         current_labels.append(label)
         url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/labels"
-        requests.post(url, headers=HEADERS, json={"labels": current_labels}, timeout=30)
+        try:
+            requests.post(url, headers=HEADERS, json={"labels": current_labels}, timeout=30)
+        except:
+            pass
 
 
 def add_contact_label(contact_id, label):
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}/labels"
-    requests.post(url, headers=HEADERS, json={"labels": [label]}, timeout=30)
+    try:
+        requests.post(url, headers=HEADERS, json={"labels": [label]}, timeout=30)
+    except:
+        pass
 
 
 def get_age_minutes(conversation):
@@ -154,7 +176,7 @@ def get_age_hours(conversation):
     return (now - dt).total_seconds() / 3600
 
 
-# ================= FLOW 1: NUEVOS =================
+# ================= FLOW 1: ASIGNACIÓN NUEVA =================
 
 def assign_new_conversations(conversations):
     global agent_index
@@ -177,10 +199,7 @@ def assign_new_conversations(conversations):
         if current_assignee:
             continue
 
-        if current_assignee in EXCLUDED_AGENTS:
-            continue
-
-        # Si ya tiene etiquetas, no es "nuevo" limpio, lo respetamos
+        # Si ya tiene etiquetas, no es "nuevo" limpio
         labels = get_labels(cid)
         if len(labels) > 0:
             continue
@@ -191,10 +210,10 @@ def assign_new_conversations(conversations):
         print(f"[NEW {cid}] → Asignando a agente {agent_id}")
 
         assign(cid, agent_id)
-        # No ponemos etiqueta. El agente debe ponerla.
+        # ❌ NO ponemos etiqueta aquí. El agente debe ponerla manualmente.
 
 
-# ================= FLOW 2: REASIGNACIÓN =================
+# ================= FLOW 2: REASIGNACIÓN POR INACTIVIDAD =================
 
 def reassign_unanswered_chats(conversations):
     print(f"\n🔄 REASIGNACIÓN (Sin etiquetas y > {REASSIGN_TIMEOUT_MINUTES} min)")
@@ -214,14 +233,12 @@ def reassign_unanswered_chats(conversations):
         if current_assignee in EXCLUDED_AGENTS:
             continue
 
-        # 2. LÓGICA DE ETIQUETAS (LA REGLA NUEVA)
+        # 2. LÓGICA DE ETIQUETAS
         labels = get_labels(cid)
         
         # 🚫 REGLA: Si tiene CUALQUIER etiqueta (sea "asignado", "seguimiento", etc.), NO SE MUEVE.
         # Solo movemos chats "limpios" (sin etiquetas) que parecen olvidados.
         if len(labels) > 0:
-            # Opcional: Descomentar para ver debug
-            # print(f"[SKIP {cid}] Tiene etiquetas ({labels}), se respeta.")
             continue
             
         # 3. Verificar tiempo transcurrido
@@ -269,7 +286,15 @@ def process_old_conversations(conversations):
 
         labels = get_labels(cid)
         
+        # 1. Si ya está en predictivo, saltamos
         if PREDICTIVE_LABEL in labels:
+            continue
+
+        # 2. REGLA DE ETIQUETAS (CORREGIDA)
+        # Solo movemos a Admin si tiene EXACTAMENTE la etiqueta 'asignado'.
+        # Esto significa que el agente lo tomó (puso "asignado") pero se olvidó de cerrar.
+        # Si tiene "seguimiento", "facturacion", etc. (cualquier otra cosa), NO se toca.
+        if labels != [LABEL]:
             continue
 
         print(f"[OLD {cid}] → ADMIN (Predictivo)")
@@ -311,7 +336,7 @@ def run():
             process_old_conversations(conversations)
 
         except Exception as e:
-            print(f"❌ ERROR: {e}")
+            print(f"❌ ERROR GLOBAL: {e}")
 
         time.sleep(CHECK_INTERVAL)
 
