@@ -1,5 +1,6 @@
 import os
 import time
+import csv
 import requests
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -12,6 +13,7 @@ ACCOUNT_ID = int(os.getenv("ACCOUNT_ID"))
 INBOX_ID = int(os.getenv("INBOX_ID"))
 
 AGENTS = list(map(int, os.getenv("AGENTS").split(",")))
+
 EXCLUDED_AGENTS = (
     list(map(int, os.getenv("EXCLUDED_AGENTS", "").split(",")))
     if os.getenv("EXCLUDED_AGENTS")
@@ -27,13 +29,18 @@ PREDICTIVE_LABEL = os.getenv("PREDICTIVE_LABEL", "predictivo")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
 ASSIGN_INTERVAL = int(os.getenv("ASSIGN_INTERVAL", 300))
 
-# ⏰ TIEMPO DE REASIGNACIÓN EN MINUTOS
-# Si el agente no pone ninguna etiqueta en este tiempo, el bot mueve el chat al siguiente agente.
+# Tiempo en minutos para mover el chat si sigue sin etiquetas
 REASSIGN_TIMEOUT_MINUTES = int(os.getenv("REASSIGN_TIMEOUT_MINUTES", 4))
 
 START_HOUR = int(os.getenv("START_HOUR", 9))
 END_HOUR = int(os.getenv("END_HOUR", 20))
 TIMEZONE = os.getenv("TIMEZONE", "America/Mexico_City")
+
+# Archivo CSV donde se registran los chats no atendidos
+UNATTENDED_LOG_FILE = os.getenv(
+    "UNATTENDED_LOG_FILE",
+    "/app/logs/chats_no_atendidos.csv"
+)
 
 tz = ZoneInfo(TIMEZONE)
 
@@ -45,9 +52,12 @@ HEADERS = {
 last_assign_time = 0
 agent_index = 0
 
-# Guarda la última vez que cada conversación fue reasignada.
-# Esto evita que el mismo chat se mueva sin parar en cada ciclo.
+# Evita que el mismo chat se mueva sin parar cada ciclo
 last_reassign_by_conversation = {}
+
+# Guarda nombres de agentes para el CSV
+AGENT_NAME_CACHE = {}
+
 
 # ================= HELPERS =================
 
@@ -69,6 +79,7 @@ def get_conversations():
 
     while True:
         url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
+
         params = {
             "status": "open",
             "inbox_id": INBOX_ID,
@@ -109,6 +120,8 @@ def get_labels(conversation_id):
 
 
 def get_online_agents():
+    global AGENT_NAME_CACHE
+
     try:
         url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/agents"
         res = requests.get(url, headers=HEADERS, timeout=30)
@@ -116,6 +129,19 @@ def get_online_agents():
 
         data = res.json()
         agents = safe_list(data, "data")
+
+        # Guardar nombres en cache para el log CSV
+        for a in agents:
+            agent_id = a.get("id")
+            agent_name = (
+                a.get("name")
+                or a.get("available_name")
+                or a.get("email")
+                or f"Agente {agent_id}"
+            )
+
+            if agent_id:
+                AGENT_NAME_CACHE[agent_id] = agent_name
 
         online = [
             a["id"]
@@ -152,7 +178,6 @@ def assign(conversation_id, agent_id):
 
 
 def add_label(conversation_id, label):
-    # Obtenemos etiquetas actuales para no borrarlas.
     current_labels = get_labels(conversation_id)
 
     if label not in current_labels:
@@ -223,14 +248,15 @@ def get_age_hours(conversation):
 
 def get_next_agent(online_agents, current_assignee):
     """
-    Devuelve el siguiente agente en la lista de agentes online.
+    Devuelve el siguiente agente online según el orden de la lista.
 
     Ejemplo:
     online_agents = [33, 25, 20, 23]
 
-    Si current_assignee = 33, devuelve 25.
-    Si current_assignee = 25, devuelve 20.
-    Si current_assignee = 23, devuelve 33.
+    33 -> 25
+    25 -> 20
+    20 -> 23
+    23 -> 33
     """
 
     if not online_agents:
@@ -244,8 +270,110 @@ def get_next_agent(online_agents, current_assignee):
         next_index = (current_index + 1) % len(online_agents)
         return online_agents[next_index]
 
-    # Si el agente actual no está online, mandamos al primer agente online filtrado.
+    # Si el agente actual ya no está online, mandamos al primer agente online filtrado
     return online_agents[0]
+
+
+def get_agent_name(agent_id):
+    if not agent_id:
+        return ""
+
+    return AGENT_NAME_CACHE.get(agent_id, f"Agente {agent_id}")
+
+
+def get_conversation_link(conversation_id):
+    base = BASE_URL.rstrip("/")
+    return f"{base}/app/accounts/{ACCOUNT_ID}/conversations/{conversation_id}"
+
+
+def ensure_unattended_log_file():
+    """
+    Crea el archivo CSV con encabezados si no existe.
+    """
+
+    log_dir = os.path.dirname(UNATTENDED_LOG_FILE)
+
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+
+    file_exists = os.path.exists(UNATTENDED_LOG_FILE)
+
+    if file_exists and os.path.getsize(UNATTENDED_LOG_FILE) > 0:
+        return
+
+    headers = [
+        "fecha_hora",
+        "conversation_id",
+        "inbox_id",
+        "contact_id",
+        "contact_name",
+        "contact_phone_or_identifier",
+        "previous_agent_id",
+        "previous_agent_name",
+        "new_agent_id",
+        "new_agent_name",
+        "age_minutes",
+        "reason",
+        "conversation_link",
+    ]
+
+    with open(UNATTENDED_LOG_FILE, mode="w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=headers)
+        writer.writeheader()
+
+    print(f"📄 Archivo de log creado: {UNATTENDED_LOG_FILE}")
+
+
+def log_unattended_chat(conversation, previous_agent_id, new_agent_id, age_minutes, reason):
+    """
+    Registra cada chat que fue reasignado porque el agente anterior
+    no colocó ninguna etiqueta dentro del tiempo permitido.
+    """
+
+    ensure_unattended_log_file()
+
+    cid = conversation.get("id")
+    inbox_id = conversation.get("inbox_id")
+
+    sender = conversation.get("meta", {}).get("sender", {}) or {}
+
+    contact_id = sender.get("id", "")
+    contact_name = sender.get("name", "")
+
+    contact_phone = (
+        sender.get("phone_number")
+        or sender.get("identifier")
+        or sender.get("email")
+        or ""
+    )
+
+    row = {
+        "fecha_hora": datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S"),
+        "conversation_id": cid,
+        "inbox_id": inbox_id,
+        "contact_id": contact_id,
+        "contact_name": contact_name,
+        "contact_phone_or_identifier": contact_phone,
+        "previous_agent_id": previous_agent_id,
+        "previous_agent_name": get_agent_name(previous_agent_id),
+        "new_agent_id": new_agent_id,
+        "new_agent_name": get_agent_name(new_agent_id),
+        "age_minutes": round(age_minutes, 2),
+        "reason": reason,
+        "conversation_link": get_conversation_link(cid),
+    }
+
+    headers = list(row.keys())
+
+    with open(UNATTENDED_LOG_FILE, mode="a", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=headers)
+        writer.writerow(row)
+
+    print(
+        f"📝 LOG NO ATENDIDO: Chat {cid} | "
+        f"{get_agent_name(previous_agent_id)} → {get_agent_name(new_agent_id)} | "
+        f"{round(age_minutes, 1)} min"
+    )
 
 
 # ================= FLOW 1: ASIGNACIÓN NUEVA =================
@@ -267,30 +395,30 @@ def assign_new_conversations(conversations):
         if c.get("inbox_id") != INBOX_ID:
             continue
 
-        # Solo entrar si NO tiene agente asignado.
         current_assignee = c.get("meta", {}).get("assignee", {}).get("id")
 
+        # Solo asignamos si no tiene agente
         if current_assignee:
             continue
 
-        # Si ya tiene etiquetas, no es un chat nuevo limpio.
         labels = get_labels(cid)
 
+        # Solo asignamos chats limpios sin etiquetas
         if len(labels) > 0:
             continue
 
         agent_id = online_agents[agent_index % len(online_agents)]
         agent_index += 1
 
-        print(f"[NEW {cid}] → Asignando a agente {agent_id}")
+        print(f"[NEW {cid}] → Asignando a agente {agent_id} - {get_agent_name(agent_id)}")
 
         ok = assign(cid, agent_id)
 
         if ok:
-            print(f"[NEW {cid}] ✅ Asignado correctamente a {agent_id}")
+            print(f"[NEW {cid}] ✅ Asignado correctamente a {agent_id} - {get_agent_name(agent_id)}")
 
         # No ponemos etiqueta aquí.
-        # El agente debe poner manualmente la etiqueta para detener el bot.
+        # El agente debe poner la etiqueta manualmente.
 
 
 # ================= FLOW 2: REASIGNACIÓN POR INACTIVIDAD =================
@@ -312,7 +440,7 @@ def reassign_unanswered_chats(conversations):
         if c.get("inbox_id") != INBOX_ID:
             continue
 
-        # 1. Debe tener agente asignado actualmente.
+        # Debe tener agente asignado actualmente
         current_assignee = c.get("meta", {}).get("assignee", {}).get("id")
 
         if not current_assignee:
@@ -321,34 +449,34 @@ def reassign_unanswered_chats(conversations):
         if current_assignee in EXCLUDED_AGENTS:
             continue
 
-        # 2. Revisión de etiquetas.
+        # Si tiene cualquier etiqueta, no se toca
         labels = get_labels(cid)
 
-        # REGLA:
-        # Si tiene cualquier etiqueta, no se mueve.
-        # Solo movemos chats sin etiquetas.
         if len(labels) > 0:
             continue
 
-        # 3. Revisar tiempo de inactividad.
+        # Tiempo sin actividad / sin gestión según tu regla actual
         age_min = get_age_minutes(c)
 
         if age_min < REASSIGN_TIMEOUT_MINUTES:
             continue
 
-        # 4. Cooldown para evitar que el mismo chat se mueva sin parar.
+        # Cooldown para evitar que el mismo chat se mueva muchas veces en segundos
         now = time.time()
         last_reassign = last_reassign_by_conversation.get(cid, 0)
         cooldown_seconds = REASSIGN_TIMEOUT_MINUTES * 60
 
         if now - last_reassign < cooldown_seconds:
             remaining = round((cooldown_seconds - (now - last_reassign)) / 60, 1)
-            print(f"[REASIGN {cid}] ⏳ Ya fue reasignado recientemente. Esperando {remaining} min.")
+            print(f"[REASIGN {cid}] ⏳ Reasignado recientemente. Esperando {remaining} min.")
             continue
 
-        print(f"[REASIGN {cid}] Inactivo {round(age_min, 1)} min SIN etiquetas. Evaluando movimiento...")
+        print(
+            f"[REASIGN {cid}] Inactivo {round(age_min, 1)} min SIN etiquetas. "
+            f"Agente actual: {current_assignee} - {get_agent_name(current_assignee)}"
+        )
 
-        # 5. Obtener siguiente agente en orden.
+        # Obtener el siguiente agente online en orden
         new_agent = get_next_agent(online_agents, current_assignee)
 
         if not new_agent:
@@ -359,14 +487,32 @@ def reassign_unanswered_chats(conversations):
             print(f"⛔ El nuevo agente es igual al actual para el chat {cid}")
             continue
 
-        # 6. Reasignar.
         ok = assign(cid, new_agent)
 
         if ok:
             last_reassign_by_conversation[cid] = now
-            print(f"[REASIGN {cid}] ✅ Movido de {current_assignee} a {new_agent}")
+
+            print(
+                f"[REASIGN {cid}] ✅ Movido de "
+                f"{current_assignee} - {get_agent_name(current_assignee)} "
+                f"a {new_agent} - {get_agent_name(new_agent)}"
+            )
+
+            # Guardar relación en CSV
+            log_unattended_chat(
+                conversation=c,
+                previous_agent_id=current_assignee,
+                new_agent_id=new_agent,
+                age_minutes=age_min,
+                reason=f"Sin etiquetas después de {REASSIGN_TIMEOUT_MINUTES} minutos"
+            )
+
         else:
-            print(f"[REASIGN {cid}] ❌ No se pudo mover de {current_assignee} a {new_agent}")
+            print(
+                f"[REASIGN {cid}] ❌ No se pudo mover de "
+                f"{current_assignee} - {get_agent_name(current_assignee)} "
+                f"a {new_agent} - {get_agent_name(new_agent)}"
+            )
 
 
 # ================= FLOW 3: LIMPIEZA 48H =================
@@ -396,15 +542,15 @@ def process_old_conversations(conversations):
 
         labels = get_labels(cid)
 
-        # 1. Si ya está en predictivo, saltamos.
+        # Si ya está en predictivo, saltamos
         if PREDICTIVE_LABEL in labels:
             continue
 
-        # 2. Solo movemos a Admin si tiene exactamente la etiqueta LABEL.
+        # Solo movemos a Admin si tiene exactamente la etiqueta LABEL
         # Ejemplo:
-        # labels = ["asignado"] sí se mueve.
-        # labels = ["seguimiento"] no se mueve.
-        # labels = ["asignado", "seguimiento"] no se mueve.
+        # ["asignado"] sí se mueve
+        # ["seguimiento"] no se mueve
+        # ["asignado", "seguimiento"] no se mueve
         if not (len(labels) == 1 and LABEL in labels):
             continue
 
@@ -433,12 +579,16 @@ def process_old_conversations(conversations):
 def run():
     global last_assign_time
 
-    print("🔥 BOT ACTIVO - MODO REASIGNACIÓN CORREGIDA")
-    print("✅ Reasignación ahora avanza al siguiente agente online")
-    print("✅ Cooldown activado para evitar bucles infinitos")
+    print("🔥 BOT ACTIVO - MODO REASIGNACIÓN CORREGIDA + LOG CSV")
+    print("✅ Reasignación al siguiente agente online")
+    print("✅ Cooldown por conversación activado")
+    print("✅ Log de chats no atendidos activado")
+    print(f"✅ Archivo CSV: {UNATTENDED_LOG_FILE}")
     print(f"✅ Timeout de reasignación: {REASSIGN_TIMEOUT_MINUTES} min")
     print(f"✅ Horario: {START_HOUR}:00 a {END_HOUR}:00")
     print(f"✅ Zona horaria: {TIMEZONE}")
+
+    ensure_unattended_log_file()
 
     while True:
         try:
@@ -455,10 +605,10 @@ def run():
                 assign_new_conversations(conversations)
                 last_assign_time = now
 
-            # 2. REASIGNACIÓN
+            # 2. REASIGNACIÓN POR FALTA DE ETIQUETA
             reassign_unanswered_chats(conversations)
 
-            # 3. LIMPIEZA
+            # 3. LIMPIEZA DE CHATS >48H
             process_old_conversations(conversations)
 
         except Exception as e:
