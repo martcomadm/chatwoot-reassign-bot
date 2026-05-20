@@ -32,9 +32,15 @@ ASSIGN_INTERVAL = int(os.getenv("ASSIGN_INTERVAL", 300))
 # Tiempo en minutos para mover el chat si sigue sin etiquetas
 REASSIGN_TIMEOUT_MINUTES = int(os.getenv("REASSIGN_TIMEOUT_MINUTES", 4))
 
+# Horario operativo
 START_HOUR = int(os.getenv("START_HOUR", 9))
 END_HOUR = int(os.getenv("END_HOUR", 20))
 TIMEZONE = os.getenv("TIMEZONE", "America/Mexico_City")
+
+# Periodo de gracia opcional al inicio del horario.
+# Ejemplo: si START_HOUR=9 y SCHEDULE_GRACE_MINUTES=10,
+# las reasignaciones empiezan a las 09:10.
+SCHEDULE_GRACE_MINUTES = int(os.getenv("SCHEDULE_GRACE_MINUTES", 0))
 
 # Archivo CSV donde se registran los chats no atendidos
 UNATTENDED_LOG_FILE = os.getenv(
@@ -52,7 +58,7 @@ HEADERS = {
 last_assign_time = 0
 agent_index = 0
 
-# Evita que el mismo chat se mueva sin parar cada ciclo
+# Evita que el mismo chat se mueva sin parar en cada ciclo
 last_reassign_by_conversation = {}
 
 # Guarda nombres de agentes para el CSV
@@ -64,13 +70,99 @@ AGENT_NAME_CACHE = {}
 def safe_list(data, key):
     if isinstance(data, list):
         return data
-    return data.get(key, [])
+
+    if isinstance(data, dict):
+        return data.get(key, [])
+
+    return []
+
+
+def is_hour_allowed(now):
+    """
+    Valida si la hora actual está dentro del horario configurado.
+
+    Soporta horarios normales:
+    START_HOUR=9
+    END_HOUR=20
+    Permitido: 09:00 a 19:59
+
+    También soporta horarios nocturnos:
+    START_HOUR=20
+    END_HOUR=6
+    Permitido: 20:00 a 05:59
+    """
+
+    if START_HOUR == END_HOUR:
+        # Si son iguales, se interpreta como 24 horas activo.
+        return True
+
+    if START_HOUR < END_HOUR:
+        return START_HOUR <= now.hour < END_HOUR
+
+    # Horario que cruza medianoche
+    return now.hour >= START_HOUR or now.hour < END_HOUR
 
 
 def is_within_schedule():
+    """
+    Validación principal del loop.
+    Si retorna False, el bot no ejecuta ningún flujo.
+    """
+
     now = datetime.now(tz)
-    print(f"\n⏰ Hora actual: {now}")
-    return START_HOUR <= now.hour < END_HOUR
+    allowed = is_hour_allowed(now)
+
+    print(
+        f"\n⏰ Hora actual: {now.strftime('%Y-%m-%d %H:%M:%S')} | "
+        f"Horario configurado: {START_HOUR}:00 a {END_HOUR}:00 | "
+        f"Timezone: {TIMEZONE} | "
+        f"Permitido: {allowed}"
+    )
+
+    return allowed
+
+
+def can_reassign_now():
+    """
+    Protección específica para reasignaciones.
+
+    Esta función evita que la reasignación se ejecute fuera del horario,
+    aunque por error alguien llame reassign_unanswered_chats() directamente
+    o aunque el ciclo haya empezado cerca del cierre.
+    """
+
+    now = datetime.now(tz)
+
+    if not is_hour_allowed(now):
+        print(
+            f"⛔ Reasignación bloqueada por horario. "
+            f"Hora actual: {now.strftime('%Y-%m-%d %H:%M:%S')} | "
+            f"Permitido: {START_HOUR}:00 a {END_HOUR}:00 | "
+            f"Timezone: {TIMEZONE}"
+        )
+        return False
+
+    # Periodo de gracia opcional al inicio del horario
+    if SCHEDULE_GRACE_MINUTES > 0 and START_HOUR != END_HOUR:
+        if START_HOUR < END_HOUR:
+            minutes_since_start = ((now.hour - START_HOUR) * 60) + now.minute
+        else:
+            # Para horarios nocturnos, calculamos correctamente el inicio
+            if now.hour >= START_HOUR:
+                minutes_since_start = ((now.hour - START_HOUR) * 60) + now.minute
+            else:
+                minutes_since_start = ((24 - START_HOUR + now.hour) * 60) + now.minute
+
+        if 0 <= minutes_since_start < SCHEDULE_GRACE_MINUTES:
+            remaining = SCHEDULE_GRACE_MINUTES - minutes_since_start
+
+            print(
+                f"⏳ Reasignación en periodo de gracia. "
+                f"Faltan {remaining} min para iniciar reasignaciones."
+            )
+            return False
+
+    return True
 
 
 def get_conversations():
@@ -114,6 +206,7 @@ def get_labels(conversation_id):
         res = requests.get(url, headers=HEADERS, timeout=30)
         res.raise_for_status()
         return res.json().get("payload", [])
+
     except Exception as e:
         print(f"❌ Error obteniendo etiquetas de conversación {conversation_id}: {e}")
         return []
@@ -130,7 +223,7 @@ def get_online_agents():
         data = res.json()
         agents = safe_list(data, "data")
 
-        # Guardar nombres en cache para el log CSV
+        # Guardar nombres en cache para logs y CSV
         for a in agents:
             agent_id = a.get("id")
             agent_name = (
@@ -418,7 +511,7 @@ def assign_new_conversations(conversations):
             print(f"[NEW {cid}] ✅ Asignado correctamente a {agent_id} - {get_agent_name(agent_id)}")
 
         # No ponemos etiqueta aquí.
-        # El agente debe poner la etiqueta manualmente.
+        # El agente debe poner la etiqueta manualmente para detener el bot.
 
 
 # ================= FLOW 2: REASIGNACIÓN POR INACTIVIDAD =================
@@ -427,6 +520,12 @@ def reassign_unanswered_chats(conversations):
     global last_reassign_by_conversation
 
     print(f"\n🔄 REASIGNACIÓN (Sin etiquetas y > {REASSIGN_TIMEOUT_MINUTES} min)")
+
+    # Protección defensiva:
+    # Aunque el loop principal ya valida horario, aquí volvemos a validar
+    # para evitar reasignaciones fuera de horario por cualquier motivo.
+    if not can_reassign_now():
+        return
 
     online_agents = get_online_agents()
 
@@ -440,6 +539,13 @@ def reassign_unanswered_chats(conversations):
         if c.get("inbox_id") != INBOX_ID:
             continue
 
+        # Protección dentro del loop:
+        # Si el ciclo empezó dentro del horario pero mientras procesa llega la hora de cierre,
+        # se detiene inmediatamente.
+        if not can_reassign_now():
+            print(f"[REASIGN {cid}] ⛔ Cancelado por horario.")
+            return
+
         # Debe tener agente asignado actualmente
         current_assignee = c.get("meta", {}).get("assignee", {}).get("id")
 
@@ -449,7 +555,8 @@ def reassign_unanswered_chats(conversations):
         if current_assignee in EXCLUDED_AGENTS:
             continue
 
-        # Si tiene cualquier etiqueta, no se toca
+        # Si tiene cualquier etiqueta, no se toca.
+        # Cualquier etiqueta significa que el agente hizo alguna gestión o marcó el chat.
         labels = get_labels(cid)
 
         if len(labels) > 0:
@@ -485,6 +592,12 @@ def reassign_unanswered_chats(conversations):
 
         if new_agent == current_assignee:
             print(f"⛔ El nuevo agente es igual al actual para el chat {cid}")
+            continue
+
+        # Doble protección justo antes de asignar:
+        # Esto evita que se reasigne si ya salió del horario entre una validación y otra.
+        if not can_reassign_now():
+            print(f"[REASIGN {cid}] ⛔ Cancelado. Salió del horario antes de reasignar.")
             continue
 
         ok = assign(cid, new_agent)
@@ -546,11 +659,11 @@ def process_old_conversations(conversations):
         if PREDICTIVE_LABEL in labels:
             continue
 
-        # Solo movemos a Admin si tiene exactamente la etiqueta LABEL
+        # Solo movemos a Admin si tiene exactamente la etiqueta LABEL.
         # Ejemplo:
-        # ["asignado"] sí se mueve
-        # ["seguimiento"] no se mueve
-        # ["asignado", "seguimiento"] no se mueve
+        # ["asignado"] sí se mueve.
+        # ["seguimiento"] no se mueve.
+        # ["asignado", "seguimiento"] no se mueve.
         if not (len(labels) == 1 and LABEL in labels):
             continue
 
@@ -579,21 +692,26 @@ def process_old_conversations(conversations):
 def run():
     global last_assign_time
 
-    print("🔥 BOT ACTIVO - MODO REASIGNACIÓN CORREGIDA + LOG CSV")
+    print("🔥 BOT ACTIVO - MODO REASIGNACIÓN CORREGIDA + LOG CSV + DEFENSA DE HORARIO")
+    print("✅ Asignación automática de chats nuevos")
     print("✅ Reasignación al siguiente agente online")
     print("✅ Cooldown por conversación activado")
-    print("✅ Log de chats no atendidos activado")
+    print("✅ Respeto total de etiquetas")
+    print("✅ Log CSV de chats no atendidos activado")
+    print("✅ Protección defensiva contra reasignaciones fuera de horario")
     print(f"✅ Archivo CSV: {UNATTENDED_LOG_FILE}")
     print(f"✅ Timeout de reasignación: {REASSIGN_TIMEOUT_MINUTES} min")
     print(f"✅ Horario: {START_HOUR}:00 a {END_HOUR}:00")
     print(f"✅ Zona horaria: {TIMEZONE}")
+    print(f"✅ Periodo de gracia inicial: {SCHEDULE_GRACE_MINUTES} min")
 
     ensure_unattended_log_file()
 
     while True:
         try:
+            # Validación principal de horario
             if not is_within_schedule():
-                print("🌙 Fuera de horario")
+                print("🌙 Fuera de horario. No se ejecutan asignaciones, reasignaciones ni limpieza.")
                 time.sleep(60)
                 continue
 
@@ -606,6 +724,7 @@ def run():
                 last_assign_time = now
 
             # 2. REASIGNACIÓN POR FALTA DE ETIQUETA
+            # Esta función también tiene validación defensiva interna de horario.
             reassign_unanswered_chats(conversations)
 
             # 3. LIMPIEZA DE CHATS >48H
