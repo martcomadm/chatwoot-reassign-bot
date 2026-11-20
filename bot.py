@@ -48,22 +48,27 @@ UNATTENDED_LOG_FILE = os.getenv(
     "/app/logs/chats_no_atendidos.csv"
 )
 
-# ---------- Buzón de recordatorios (respuesta automática con plantilla) ----------
-# Cuando un cliente responde en el buzón de recordatorios después de que se le
-# envió un recordatorio de pago, se le manda la plantilla de WhatsApp (Twilio).
-# Se vuelve a mandar solo si ya pasaron REMINDER_RESEND_HOURS desde la última vez
-# o si hubo un recordatorio nuevo después de la última plantilla.
+# ---------- Buzón de recordatorios (plantilla programada) ----------
+# Si pasan REMINDER_DELAY_HOURS desde el último mensaje de Recordatorios MARTCOM
+# (recordatorio o respuesta de un agente) y el cliente no ha escrito después,
+# se le manda la plantilla de WhatsApp (Twilio) una sola vez.
 REMINDER_ENABLED = os.getenv("REMINDER_ENABLED", "true").lower() in ("1", "true", "yes", "si", "sí")
 REMINDER_INBOX_ID = int(os.getenv("REMINDER_INBOX_ID", 7))
 REMINDER_TEMPLATE_NAME = os.getenv("REMINDER_TEMPLATE_NAME", "aviso2")
 # Si se deja vacío, se detecta solo desde las plantillas sincronizadas del buzón.
 REMINDER_TEMPLATE_LANGUAGE = os.getenv("REMINDER_TEMPLATE_LANGUAGE", "")
-REMINDER_RESEND_HOURS = float(os.getenv("REMINDER_RESEND_HOURS", 24))
-# Solo se contestan mensajes recientes (evita mandar la plantilla a chats viejos
-# la primera vez que arranca el bot).
-REMINDER_REPLY_MAX_AGE_MINUTES = int(os.getenv("REMINDER_REPLY_MAX_AGE_MINUTES", 60))
-# Si es true, la plantilla se manda a cualquier hora (no depende de START_HOUR/END_HOUR).
-REMINDER_IGNORE_SCHEDULE = os.getenv("REMINDER_IGNORE_SCHEDULE", "true").lower() in ("1", "true", "yes", "si", "sí")
+# Horas de espera después del último mensaje de MARTCOM
+REMINDER_DELAY_HOURS = float(os.getenv("REMINDER_DELAY_HOURS", 48))
+# Ventana para alcanzar a mandar la plantilla después de cumplirse las 48 h.
+# Evita mandarla a chats muy viejos la primera vez que arranca el bot.
+# Con 24: se manda a chats cuyo último mensaje de MARTCOM tenga entre 48 y 72 h.
+REMINDER_SEND_WINDOW_HOURS = float(os.getenv("REMINDER_SEND_WINDOW_HOURS", 24))
+# Cada cuántos segundos se revisa el buzón
+REMINDER_CHECK_INTERVAL = int(os.getenv("REMINDER_CHECK_INTERVAL", 300))
+# true = también revisa conversaciones resueltas
+REMINDER_INCLUDE_RESOLVED = os.getenv("REMINDER_INCLUDE_RESOLVED", "false").lower() in ("1", "true", "yes", "si", "sí")
+# Si es false, la plantilla solo se manda dentro de START_HOUR/END_HOUR
+REMINDER_IGNORE_SCHEDULE = os.getenv("REMINDER_IGNORE_SCHEDULE", "false").lower() in ("1", "true", "yes", "si", "sí")
 
 tz = ZoneInfo(TIMEZONE)
 
@@ -709,8 +714,7 @@ def process_old_conversations(conversations):
 # Datos de la plantilla leídos del buzón (idioma y texto)
 REMINDER_TEMPLATE_CACHE = {"loaded_at": 0, "language": None, "body": None}
 
-# Último mensaje entrante ya procesado por conversación (evita duplicados)
-reminder_handled_message = {}
+last_reminder_check = 0
 
 
 def load_reminder_template():
@@ -766,16 +770,18 @@ def load_reminder_template():
     return REMINDER_TEMPLATE_CACHE
 
 
-def get_recent_reminder_conversations():
+def get_due_reminder_conversations():
     """
-    Conversaciones del buzón de recordatorios ordenadas por actividad reciente.
-    Deja de paginar cuando las conversaciones ya son más viejas que la ventana.
+    Conversaciones del buzón de recordatorios cuya última actividad tiene
+    entre REMINDER_DELAY_HOURS y REMINDER_DELAY_HOURS + REMINDER_SEND_WINDOW_HOURS.
+    Se recorren de la más reciente a la más vieja y se corta al salir de la ventana.
     """
 
     result = []
     page = 1
-    max_age_seconds = REMINDER_REPLY_MAX_AGE_MINUTES * 60
     now = time.time()
+    min_age = REMINDER_DELAY_HOURS * 3600
+    max_age = (REMINDER_DELAY_HOURS + REMINDER_SEND_WINDOW_HOURS) * 3600
 
     while True:
         url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
@@ -802,10 +808,17 @@ def get_recent_reminder_conversations():
 
         for c in payload:
             ts = c.get("timestamp") or c.get("last_activity_at") or 0
+            age = now - ts
 
-            if now - ts > max_age_seconds:
+            if age > max_age:
                 reached_old = True
                 break
+
+            if age < min_age:
+                continue
+
+            if c.get("status") == "resolved" and not REMINDER_INCLUDE_RESOLVED:
+                continue
 
             result.append(c)
 
@@ -874,23 +887,23 @@ def send_reminder_template(conversation_id, template):
         return False
 
 
-def reply_reminder_conversations():
+def send_scheduled_reminder_templates():
     """
-    Para cada conversación reciente del buzón de recordatorios:
-    1. El último mensaje debe ser del cliente.
-    2. Antes de ese mensaje debe existir un recordatorio (mensaje saliente
-       que no sea la plantilla de respuesta).
-    3. Se manda la plantilla si:
-       - nunca se ha mandado después del último recordatorio, o
-       - ya pasaron REMINDER_RESEND_HOURS desde la última plantilla.
+    Para cada conversación del buzón de recordatorios:
+    1. El último mensaje (no privado) debe ser de Recordatorios MARTCOM
+       (recordatorio o respuesta de agente), no del cliente.
+    2. Ese mensaje no debe ser la propia plantilla (se manda una sola vez).
+    3. Deben haber pasado REMINDER_DELAY_HOURS desde ese mensaje.
     """
 
-    print(f"\n🔔 BUZÓN RECORDATORIOS ({REMINDER_INBOX_ID}) → plantilla '{REMINDER_TEMPLATE_NAME}'")
+    print(
+        f"\n🔔 BUZÓN RECORDATORIOS ({REMINDER_INBOX_ID}) → plantilla '{REMINDER_TEMPLATE_NAME}' "
+        f"{REMINDER_DELAY_HOURS:g} h después del último mensaje de MARTCOM"
+    )
 
     template = load_reminder_template()
 
     # Si Chatwoot no tiene la plantilla sincronizada, el envío falla en Twilio.
-    # Mejor no mandar nada hasta que esté disponible.
     if not template["body"]:
         print(
             f"⛔ Plantilla '{REMINDER_TEMPLATE_NAME}' no disponible en el buzón {REMINDER_INBOX_ID}. "
@@ -898,7 +911,10 @@ def reply_reminder_conversations():
         )
         return
 
-    conversations = get_recent_reminder_conversations()
+    conversations = get_due_reminder_conversations()
+    print(f"📥 Conversaciones en ventana de envío: {len(conversations)}")
+
+    now = time.time()
     sent = 0
 
     for c in conversations:
@@ -907,62 +923,39 @@ def reply_reminder_conversations():
         if c.get("inbox_id") != REMINDER_INBOX_ID:
             continue
 
-        # Filtro rápido: solo si el último mensaje es del cliente (incoming = 0)
-        last = c.get("last_non_activity_message") or {}
-
-        if last.get("message_type") != 0:
-            continue
-
-        if reminder_handled_message.get(cid) == last.get("id"):
-            continue
-
         messages = [
             m for m in get_messages(cid)
             if not m.get("private") and m.get("message_type") in (0, 1, 3)
         ]
 
-        if not messages or messages[-1].get("message_type") != 0:
+        if not messages:
             continue
 
-        last_incoming = messages[-1]
+        last = messages[-1]
 
-        if time.time() - (last_incoming.get("created_at") or 0) > REMINDER_REPLY_MAX_AGE_MINUTES * 60:
+        # El cliente escribió después → no se manda
+        if last.get("message_type") == 0:
             continue
 
-        last_reminder_at = None
-        last_template_at = None
-
-        for m in messages[:-1]:
-            if m.get("message_type") not in (1, 3):
-                continue
-
-            if is_template_message(m, template["body"]):
-                last_template_at = m.get("created_at")
-            else:
-                last_reminder_at = m.get("created_at")
-
-        if not last_reminder_at:
-            # No hay recordatorio previo en el historial reciente
-            reminder_handled_message[cid] = last_incoming.get("id")
+        # Ya se mandó la plantilla después del último mensaje de MARTCOM
+        if is_template_message(last, template["body"]):
             continue
 
-        if last_template_at and last_template_at > last_reminder_at:
-            hours_since = (time.time() - last_template_at) / 3600
+        # Doble validación con la hora exacta del mensaje
+        hours_since = (now - (last.get("created_at") or now)) / 3600
 
-            if hours_since < REMINDER_RESEND_HOURS:
-                print(
-                    f"[RECORD {cid}] ⏳ Plantilla enviada hace {round(hours_since, 1)} h. "
-                    f"No se reenvía hasta {REMINDER_RESEND_HOURS} h."
-                )
-                reminder_handled_message[cid] = last_incoming.get("id")
-                continue
+        if hours_since < REMINDER_DELAY_HOURS:
+            continue
 
-        ok = send_reminder_template(cid, template)
-        reminder_handled_message[cid] = last_incoming.get("id")
+        if hours_since > REMINDER_DELAY_HOURS + REMINDER_SEND_WINDOW_HOURS:
+            continue
 
-        if ok:
+        if send_reminder_template(cid, template):
             sent += 1
-            print(f"[RECORD {cid}] ✅ Plantilla '{REMINDER_TEMPLATE_NAME}' enviada")
+            print(
+                f"[RECORD {cid}] ✅ Plantilla '{REMINDER_TEMPLATE_NAME}' enviada "
+                f"({round(hours_since, 1)} h después del último mensaje de MARTCOM)"
+            )
 
     print(f"📊 Plantillas enviadas en este ciclo: {sent}")
 
@@ -970,7 +963,7 @@ def reply_reminder_conversations():
 # ================= LOOP =================
 
 def run():
-    global last_assign_time
+    global last_assign_time, last_reminder_check
 
     print("🔥 BOT ACTIVO - MODO REASIGNACIÓN CORREGIDA + LOG CSV + DEFENSA DE HORARIO")
     print("✅ Asignación automática de chats nuevos")
@@ -990,16 +983,21 @@ def run():
     if REMINDER_ENABLED:
         print(
             f"✅ Buzón recordatorios {REMINDER_INBOX_ID}: plantilla '{REMINDER_TEMPLATE_NAME}' "
-            f"(reenvío cada {REMINDER_RESEND_HOURS} h, "
-            f"{'24/7' if REMINDER_IGNORE_SCHEDULE else 'solo en horario'})"
+            f"{REMINDER_DELAY_HOURS:g} h después del último mensaje de MARTCOM, "
+            f"{'24/7' if REMINDER_IGNORE_SCHEDULE else 'solo en horario'}"
         )
 
     while True:
         # 4. PLANTILLA EN BUZÓN DE RECORDATORIOS
         # Va separado para que un error aquí no detenga los otros flujos.
-        if REMINDER_ENABLED and (REMINDER_IGNORE_SCHEDULE or is_hour_allowed(datetime.now(tz))):
+        if (
+            REMINDER_ENABLED
+            and time.time() - last_reminder_check >= REMINDER_CHECK_INTERVAL
+            and (REMINDER_IGNORE_SCHEDULE or is_hour_allowed(datetime.now(tz)))
+        ):
+            last_reminder_check = time.time()
             try:
-                reply_reminder_conversations()
+                send_scheduled_reminder_templates()
             except Exception as e:
                 print(f"❌ ERROR EN FLUJO DE RECORDATORIOS: {e}")
 
