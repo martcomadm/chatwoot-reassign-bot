@@ -48,6 +48,23 @@ UNATTENDED_LOG_FILE = os.getenv(
     "/app/logs/chats_no_atendidos.csv"
 )
 
+# ---------- Buzón de recordatorios (respuesta automática con plantilla) ----------
+# Cuando un cliente responde en el buzón de recordatorios después de que se le
+# envió un recordatorio de pago, se le manda la plantilla de WhatsApp (Twilio).
+# Se vuelve a mandar solo si ya pasaron REMINDER_RESEND_HOURS desde la última vez
+# o si hubo un recordatorio nuevo después de la última plantilla.
+REMINDER_ENABLED = os.getenv("REMINDER_ENABLED", "true").lower() in ("1", "true", "yes", "si", "sí")
+REMINDER_INBOX_ID = int(os.getenv("REMINDER_INBOX_ID", 7))
+REMINDER_TEMPLATE_NAME = os.getenv("REMINDER_TEMPLATE_NAME", "aviso2")
+# Si se deja vacío, se detecta solo desde las plantillas sincronizadas del buzón.
+REMINDER_TEMPLATE_LANGUAGE = os.getenv("REMINDER_TEMPLATE_LANGUAGE", "")
+REMINDER_RESEND_HOURS = float(os.getenv("REMINDER_RESEND_HOURS", 24))
+# Solo se contestan mensajes recientes (evita mandar la plantilla a chats viejos
+# la primera vez que arranca el bot).
+REMINDER_REPLY_MAX_AGE_MINUTES = int(os.getenv("REMINDER_REPLY_MAX_AGE_MINUTES", 60))
+# Si es true, la plantilla se manda a cualquier hora (no depende de START_HOUR/END_HOUR).
+REMINDER_IGNORE_SCHEDULE = os.getenv("REMINDER_IGNORE_SCHEDULE", "true").lower() in ("1", "true", "yes", "si", "sí")
+
 tz = ZoneInfo(TIMEZONE)
 
 HEADERS = {
@@ -687,6 +704,255 @@ def process_old_conversations(conversations):
     print(f"📊 Chats >48h detectados: {count_candidates}")
 
 
+# ================= FLOW 4: PLANTILLA EN BUZÓN DE RECORDATORIOS =================
+
+# Datos de la plantilla leídos del buzón (idioma y texto)
+REMINDER_TEMPLATE_CACHE = {"loaded_at": 0, "language": None, "body": None}
+
+# Último mensaje entrante ya procesado por conversación (evita duplicados)
+reminder_handled_message = {}
+
+
+def load_reminder_template():
+    """
+    Lee las plantillas de Twilio sincronizadas en el buzón de recordatorios
+    para obtener el idioma exacto y el texto de la plantilla.
+    Se refresca cada 30 minutos.
+    """
+
+    if time.time() - REMINDER_TEMPLATE_CACHE["loaded_at"] < 1800 and REMINDER_TEMPLATE_CACHE["body"]:
+        return REMINDER_TEMPLATE_CACHE
+
+    language = REMINDER_TEMPLATE_LANGUAGE or None
+    body = None
+
+    try:
+        url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/inboxes/{REMINDER_INBOX_ID}"
+        res = requests.get(url, headers=HEADERS, timeout=30)
+        res.raise_for_status()
+
+        templates = (res.json().get("content_templates") or {}).get("templates", []) or []
+
+        candidates = [
+            t for t in templates
+            if t.get("friendly_name") == REMINDER_TEMPLATE_NAME
+            and (not language or t.get("language") == language)
+        ]
+        approved = [t for t in candidates if t.get("status") == "approved"]
+        template = (approved or candidates or [None])[0]
+
+        if template:
+            language = template.get("language") or language
+            body = template.get("body") or None
+
+            if template.get("status") != "approved":
+                print(
+                    f"⚠️ La plantilla '{REMINDER_TEMPLATE_NAME}' aparece en Chatwoot con estado "
+                    f"'{template.get('status')}'. Sincroniza las plantillas del buzón {REMINDER_INBOX_ID}."
+                )
+        else:
+            print(
+                f"⚠️ No se encontró la plantilla '{REMINDER_TEMPLATE_NAME}' en el buzón {REMINDER_INBOX_ID}. "
+                f"Sincroniza las plantillas en Ajustes > Buzones > Recordatorios."
+            )
+
+    except Exception as e:
+        print(f"❌ Error leyendo plantillas del buzón {REMINDER_INBOX_ID}: {e}")
+
+    REMINDER_TEMPLATE_CACHE["loaded_at"] = time.time()
+    REMINDER_TEMPLATE_CACHE["language"] = language or "es_MX"
+    REMINDER_TEMPLATE_CACHE["body"] = body
+
+    return REMINDER_TEMPLATE_CACHE
+
+
+def get_recent_reminder_conversations():
+    """
+    Conversaciones del buzón de recordatorios ordenadas por actividad reciente.
+    Deja de paginar cuando las conversaciones ya son más viejas que la ventana.
+    """
+
+    result = []
+    page = 1
+    max_age_seconds = REMINDER_REPLY_MAX_AGE_MINUTES * 60
+    now = time.time()
+
+    while True:
+        url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
+        params = {
+            "status": "all",
+            "inbox_id": REMINDER_INBOX_ID,
+            "sort_by": "last_activity_at_desc",
+            "page": page,
+        }
+
+        try:
+            res = requests.get(url, headers=HEADERS, params=params, timeout=30)
+            res.raise_for_status()
+        except Exception as e:
+            print(f"❌ Error obteniendo conversaciones del buzón {REMINDER_INBOX_ID}: {e}")
+            return result
+
+        payload = res.json().get("data", {}).get("payload", [])
+
+        if not payload:
+            break
+
+        reached_old = False
+
+        for c in payload:
+            ts = c.get("timestamp") or c.get("last_activity_at") or 0
+
+            if now - ts > max_age_seconds:
+                reached_old = True
+                break
+
+            result.append(c)
+
+        if reached_old:
+            break
+
+        page += 1
+
+    return result
+
+
+def get_messages(conversation_id):
+    try:
+        url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/messages"
+        res = requests.get(url, headers=HEADERS, timeout=30)
+        res.raise_for_status()
+        return res.json().get("payload", []) or []
+
+    except Exception as e:
+        print(f"❌ Error obteniendo mensajes de la conversación {conversation_id}: {e}")
+        return []
+
+
+def is_template_message(message, template_body):
+    """
+    Detecta si un mensaje saliente es la plantilla de respuesta que manda el bot.
+    """
+
+    content = (message.get("content") or "").strip()
+
+    if not content:
+        return False
+
+    if template_body and content == template_body.strip():
+        return True
+
+    # Respaldo por si cambia ligeramente el texto de la plantilla
+    return content.startswith("¡Hola! Gracias por comunicarte con MARTCOM")
+
+
+def send_reminder_template(conversation_id, template):
+    url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/messages"
+
+    payload = {
+        "content": template["body"] or f"[Plantilla {REMINDER_TEMPLATE_NAME}]",
+        "message_type": "outgoing",
+        "private": False,
+        "template_params": {
+            "name": REMINDER_TEMPLATE_NAME,
+            "language": template["language"],
+            "processed_params": {},
+        },
+    }
+
+    try:
+        res = requests.post(url, headers=HEADERS, json=payload, timeout=30)
+        res.raise_for_status()
+        return True
+
+    except Exception as e:
+        print(f"❌ Error enviando plantilla '{REMINDER_TEMPLATE_NAME}' a conversación {conversation_id}: {e}")
+        return False
+
+
+def reply_reminder_conversations():
+    """
+    Para cada conversación reciente del buzón de recordatorios:
+    1. El último mensaje debe ser del cliente.
+    2. Antes de ese mensaje debe existir un recordatorio (mensaje saliente
+       que no sea la plantilla de respuesta).
+    3. Se manda la plantilla si:
+       - nunca se ha mandado después del último recordatorio, o
+       - ya pasaron REMINDER_RESEND_HOURS desde la última plantilla.
+    """
+
+    print(f"\n🔔 BUZÓN RECORDATORIOS ({REMINDER_INBOX_ID}) → plantilla '{REMINDER_TEMPLATE_NAME}'")
+
+    template = load_reminder_template()
+    conversations = get_recent_reminder_conversations()
+    sent = 0
+
+    for c in conversations:
+        cid = c.get("id")
+
+        if c.get("inbox_id") != REMINDER_INBOX_ID:
+            continue
+
+        # Filtro rápido: solo si el último mensaje es del cliente (incoming = 0)
+        last = c.get("last_non_activity_message") or {}
+
+        if last.get("message_type") != 0:
+            continue
+
+        if reminder_handled_message.get(cid) == last.get("id"):
+            continue
+
+        messages = [
+            m for m in get_messages(cid)
+            if not m.get("private") and m.get("message_type") in (0, 1, 3)
+        ]
+
+        if not messages or messages[-1].get("message_type") != 0:
+            continue
+
+        last_incoming = messages[-1]
+
+        if time.time() - (last_incoming.get("created_at") or 0) > REMINDER_REPLY_MAX_AGE_MINUTES * 60:
+            continue
+
+        last_reminder_at = None
+        last_template_at = None
+
+        for m in messages[:-1]:
+            if m.get("message_type") not in (1, 3):
+                continue
+
+            if is_template_message(m, template["body"]):
+                last_template_at = m.get("created_at")
+            else:
+                last_reminder_at = m.get("created_at")
+
+        if not last_reminder_at:
+            # No hay recordatorio previo en el historial reciente
+            reminder_handled_message[cid] = last_incoming.get("id")
+            continue
+
+        if last_template_at and last_template_at > last_reminder_at:
+            hours_since = (time.time() - last_template_at) / 3600
+
+            if hours_since < REMINDER_RESEND_HOURS:
+                print(
+                    f"[RECORD {cid}] ⏳ Plantilla enviada hace {round(hours_since, 1)} h. "
+                    f"No se reenvía hasta {REMINDER_RESEND_HOURS} h."
+                )
+                reminder_handled_message[cid] = last_incoming.get("id")
+                continue
+
+        ok = send_reminder_template(cid, template)
+        reminder_handled_message[cid] = last_incoming.get("id")
+
+        if ok:
+            sent += 1
+            print(f"[RECORD {cid}] ✅ Plantilla '{REMINDER_TEMPLATE_NAME}' enviada")
+
+    print(f"📊 Plantillas enviadas en este ciclo: {sent}")
+
+
 # ================= LOOP =================
 
 def run():
@@ -707,7 +973,22 @@ def run():
 
     ensure_unattended_log_file()
 
+    if REMINDER_ENABLED:
+        print(
+            f"✅ Buzón recordatorios {REMINDER_INBOX_ID}: plantilla '{REMINDER_TEMPLATE_NAME}' "
+            f"(reenvío cada {REMINDER_RESEND_HOURS} h, "
+            f"{'24/7' if REMINDER_IGNORE_SCHEDULE else 'solo en horario'})"
+        )
+
     while True:
+        # 4. PLANTILLA EN BUZÓN DE RECORDATORIOS
+        # Va separado para que un error aquí no detenga los otros flujos.
+        if REMINDER_ENABLED and (REMINDER_IGNORE_SCHEDULE or is_hour_allowed(datetime.now(tz))):
+            try:
+                reply_reminder_conversations()
+            except Exception as e:
+                print(f"❌ ERROR EN FLUJO DE RECORDATORIOS: {e}")
+
         try:
             # Validación principal de horario
             if not is_within_schedule():
