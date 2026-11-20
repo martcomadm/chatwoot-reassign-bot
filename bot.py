@@ -842,6 +842,10 @@ def is_template_message(message, template_body):
     if template_body and content == template_body.strip():
         return True
 
+    # Intentos anteriores del bot que fallaron sin texto de plantilla
+    if content == f"[Plantilla {REMINDER_TEMPLATE_NAME}]":
+        return True
+
     # Respaldo por si cambia ligeramente el texto de la plantilla
     return content.startswith("¡Hola! Gracias por comunicarte con MARTCOM")
 
@@ -850,7 +854,7 @@ def send_reminder_template(conversation_id, template):
     url = f"{BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/messages"
 
     payload = {
-        "content": template["body"] or f"[Plantilla {REMINDER_TEMPLATE_NAME}]",
+        "content": template["body"],
         "message_type": "outgoing",
         "private": False,
         "template_params": {
@@ -884,6 +888,16 @@ def reply_reminder_conversations():
     print(f"\n🔔 BUZÓN RECORDATORIOS ({REMINDER_INBOX_ID}) → plantilla '{REMINDER_TEMPLATE_NAME}'")
 
     template = load_reminder_template()
+
+    # Si Chatwoot no tiene la plantilla sincronizada, el envío falla en Twilio.
+    # Mejor no mandar nada hasta que esté disponible.
+    if not template["body"]:
+        print(
+            f"⛔ Plantilla '{REMINDER_TEMPLATE_NAME}' no disponible en el buzón {REMINDER_INBOX_ID}. "
+            f"No se envía nada en este ciclo."
+        )
+        return
+
     conversations = get_recent_reminder_conversations()
     sent = 0
 
